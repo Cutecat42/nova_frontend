@@ -20,6 +20,7 @@ function readSummaryMarker(mem) {
   const m = (mem || "").match(/^\[upto:(\d+)\]/);
   return m ? Number(m[1]) : 0;
 }
+
 function stripSummaryMarker(mem) {
   return (mem || "").replace(/^\[upto:\d+\]\n?/, "");
 }
@@ -45,27 +46,34 @@ function splitIntoPieces(text, maxWords) {
   const pieces = [];
   let cur = [],
     count = 0;
+
   for (const line of (text || "").split("\n")) {
     const lw = line.split(/\s+/).filter(Boolean).length;
+
     if (lw > maxWords) {
       if (cur.length) {
         pieces.push(cur.join("\n"));
         cur = [];
         count = 0;
       }
+
       const w = line.split(/\s+/);
-      for (let i = 0; i < w.length; i += maxWords)
+      for (let i = 0; i < w.length; i += maxWords) {
         pieces.push(w.slice(i, i + maxWords).join(" "));
+      }
       continue;
     }
+
     if (count + lw > maxWords && cur.length) {
       pieces.push(cur.join("\n"));
       cur = [];
       count = 0;
     }
+
     cur.push(line);
     count += lw;
   }
+
   if (cur.length) pieces.push(cur.join("\n"));
   return pieces;
 }
@@ -76,6 +84,7 @@ function chunkMessages(msgs, maxWords = 250) {
   let cur = [],
     count = 0,
     from = null;
+
   const flush = () => {
     if (cur.length) {
       parts[from] = (parts[from] ?? -1) + 1;
@@ -85,8 +94,10 @@ function chunkMessages(msgs, maxWords = 250) {
     count = 0;
     from = null;
   };
+
   for (const m of msgs) {
     const label = m.role === "user" ? "User: " : "Nova: ";
+
     for (const piece of splitIntoPieces(m.text, maxWords)) {
       const w = piece.split(/\s+/).filter(Boolean).length;
       if (count + w > maxWords && cur.length) flush();
@@ -95,6 +106,7 @@ function chunkMessages(msgs, maxWords = 250) {
       count += w;
     }
   }
+
   flush();
   return chunks;
 }
@@ -119,13 +131,20 @@ function applyStateOps(stateText, ops) {
 
   for (const op of ops) {
     if (op.op === "clear") items.forEach((_, i) => drop.add(i));
-    if (op.op === "remove")
+
+    if (op.op === "remove") {
       (op.numbers || []).forEach((n) => drop.add(Number(n) - 1));
-    if (op.op === "done")
+    }
+
+    if (op.op === "done") {
       (op.numbers || []).forEach((n) => {
         const i = Number(n) - 1;
-        if (items[i] && !items[i].startsWith("✔ ")) items[i] = "✔ " + items[i];
+        if (items[i] && !items[i].startsWith("✔ ")) {
+          items[i] = "✔ " + items[i];
+        }
       });
+    }
+
     if (op.op === "add") {
       const tag = `[${String(op.list || "Main").trim()}] `;
       (op.items || []).forEach((t) => {
@@ -144,11 +163,13 @@ function applyStateOps(stateText, ops) {
   const tagOf = (l) =>
     (l.replace(/^✔ /, "").match(/^\[([^\]]+)\]/) || [null, "~"])[1];
   const order = [...new Set(all.map(tagOf))];
+
   return order.flatMap((t) => all.filter((l) => tagOf(l) === t)).join("\n");
 }
 
 function formatStateForPrompt(state) {
   const groups = {};
+
   state
     .split("\n")
     .filter(Boolean)
@@ -160,16 +181,15 @@ function formatStateForPrompt(state) {
       const text = m ? m[2] : clean;
       (groups[tag] = groups[tag] || []).push(`- ${done ? "✔ " : ""}${text}`);
     });
+
   return Object.entries(groups)
     .map(([tag, items]) => `**${tag}**\n${items.join("\n")}`)
     .join("\n\n");
 }
 
 function App() {
-  // --- Core Endpoints ---
-  const TUNNEL_URL = "https://prefers-starting-bar-rear.trycloudflare.com";
   const API_URL = "https://nova-api.musical-kitty.workers.dev";
-  const LOCAL_BACKEND = "http://localhost:3001";
+
   const OLLAMA_MODEL = "Nova";
   const EXTRACT_MODEL = "llama3.2:3b";
   const SUMMARY_MODEL = "llama3.2:3b";
@@ -178,9 +198,15 @@ function App() {
   const [currentUser, setCurrentUser] = useState(
     localStorage.getItem("currentUser") || null,
   );
+
   const [currentUserId, setCurrentUserId] = useState(
     localStorage.getItem("currentUserId") || null,
   );
+
+  const [authToken, setAuthToken] = useState(
+    localStorage.getItem("authToken") || null,
+  );
+
   const [username, setUsername] = useState("");
   const [passkey, setPasskey] = useState("");
   const [authError, setAuthError] = useState("");
@@ -224,6 +250,30 @@ function App() {
   const chatSessionsRef = useRef(chatSessions);
   const previousSessionRef = useRef(null);
 
+  // --- Authenticated API helper ---
+  async function apiFetch(path, options = {}) {
+    if (!authToken) {
+      throw new Error("Your login token is missing. Please log in again.");
+    }
+
+    const headers = new Headers(options.headers || {});
+    headers.set("Authorization", `Bearer ${authToken}`);
+
+    if (options.body && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    return fetch(`${API_URL}${path}`, {
+      ...options,
+      headers,
+    });
+  }
+
+  // Ollama operations are also routed through the Worker.
+  async function ollamaFetch(path, options = {}) {
+    return apiFetch(`/api/ollama${path}`, options);
+  }
+
   // --- Initialization & API Fetching ---
   useEffect(() => {
     localStorage.setItem("customInstructions", customInstructions);
@@ -238,9 +288,11 @@ function App() {
   }, [currentSessionId]);
 
   useEffect(() => {
-    if (currentUser && currentUserId) {
+    if (currentUser && currentUserId && authToken) {
       localStorage.setItem("currentUser", currentUser);
       localStorage.setItem("currentUserId", currentUserId);
+      localStorage.setItem("authToken", authToken);
+
       fetchSessions();
       fetchRegistryFacts();
       fetchChatStates();
@@ -248,16 +300,24 @@ function App() {
     } else {
       localStorage.removeItem("currentUser");
       localStorage.removeItem("currentUserId");
+      localStorage.removeItem("authToken");
+
       setChatSessions([]);
       setChatStates([]);
       setActiveRegistry("");
+      setCurrentSessionId(null);
+      setMessages([]);
+      setBackgroundMemory("");
+      setAuthToken(null);
     }
-  }, [currentUser, currentUserId]);
+  }, [currentUser, currentUserId, authToken]);
 
   useEffect(() => {
     if (isTyping || isConsolidating || memoryBusy || !currentSessionId) return;
     if (Date.now() < summaryBackoffUntil.current) return;
+
     const upto = readSummaryMarker(backgroundMemory);
+
     if (messages.length - CHAT_WINDOW - upto >= SUMMARY_MIN_NEW) {
       consolidateUniversalMemory();
     }
@@ -271,8 +331,6 @@ function App() {
   ]);
 
   useEffect(() => {
-    const lastMsg = messages[messages.length - 1];
-
     if (
       currentSessionId !== previousSessionRef.current &&
       messages.length > 0
@@ -291,19 +349,28 @@ function App() {
   // Run once in the browser console: rebuildNovaIndex()
   async function rebuildNovaIndex() {
     for (const s of chatSessionsRef.current) {
-      const res = await fetch(`${API_URL}/api/messages?sessionId=${s.id}`);
+      const res = await apiFetch(
+        `/api/messages?sessionId=${encodeURIComponent(s.id)}`,
+      );
+
       if (!res.ok) continue;
+
       const msgs = (await res.json())
         .map((m, i) => ({ role: m.role, text: m.text, idx: i }))
         .filter((m) => m.text && m.text.trim() && !isListHeavy(m.text));
+
       const chunks = chunkMessages(msgs);
+
       for (let i = 0; i < chunks.length; i += 16) {
         await embedAndStoreChunks(chunks.slice(i, i + 16), s.id);
       }
+
       console.log(`✅ Indexed "${s.title}": ${chunks.length} chunks`);
     }
+
     console.log("🏁 Rebuild finished");
   }
+
   useEffect(() => {
     window.rebuildNovaIndex = rebuildNovaIndex;
   });
@@ -311,10 +378,12 @@ function App() {
   // --- Database API Methods ---
   async function fetchSessions() {
     try {
-      const res = await fetch(
-        `${API_URL}/api/sessions?userId=${currentUserId}`,
-      );
-      if (res.ok) setChatSessions(await res.json());
+      const res = await apiFetch("/api/sessions");
+      if (res.ok) {
+        setChatSessions(await res.json());
+      } else if (res.status === 401) {
+        handleLogout();
+      }
     } catch (e) {
       console.error("Failed to fetch sessions from cloud:", e);
     }
@@ -322,15 +391,23 @@ function App() {
 
   async function fetchRegistryFacts() {
     try {
-      const res = await fetch(`${API_URL}/api/facts?userId=${currentUserId}`);
+      const res = await apiFetch("/api/facts");
+
       if (res.ok) {
         const facts = await res.json();
         const fmt = (list) =>
           list.map((f) => `- ${f.Fact_Key}: ${f.Fact_Value}`).join("\n");
-        const identity = facts.filter((f) => f.Context_Tag == "Identity");
+
+        const identity = facts.filter((f) => f.Context_Tag === "Identity");
         let text = "";
-        if (identity.length) text += `[WHO THE USER IS]\n${fmt(identity)}\n\n`;
+
+        if (identity.length) {
+          text += `[WHO THE USER IS]\n${fmt(identity)}\n\n`;
+        }
+
         setActiveRegistry(text.trim());
+      } else if (res.status === 401) {
+        handleLogout();
       } else {
         console.error("Registry fetch failed:", res.status, await res.text());
       }
@@ -341,13 +418,14 @@ function App() {
 
   async function fetchChatStates() {
     try {
-      const res = await fetch(
-        `${API_URL}/api/chat-state?userId=${currentUserId}`,
-      );
+      const res = await apiFetch("/api/chat-state");
+
       if (!res.ok) {
+        if (res.status === 401) handleLogout();
         console.error("Chat state fetch failed:", res.status, await res.text());
         return [];
       }
+
       const rows = await res.json();
       setChatStates(rows);
       return rows;
@@ -360,6 +438,7 @@ function App() {
   function findMentionedChats(message, excludeId) {
     const msg = message.toLowerCase();
     const msgWords = new Set(msg.match(/[a-z0-9]{4,}/g) || []);
+
     const stop = new Set([
       "chat",
       "list",
@@ -378,11 +457,14 @@ function App() {
       "your",
       "give",
     ]);
+
     return chatStates
       .filter((c) => {
         if (c.id === excludeId || !c.state) return false;
+
         const title = (c.title || "").toLowerCase();
         if (title && msg.includes(title)) return true;
+
         return (title.match(/[a-z0-9]{4,}/g) || []).some(
           (w) => !stop.has(w) && msgWords.has(w),
         );
@@ -398,11 +480,14 @@ function App() {
       console.log("🚫 Extractor bypassed: Placeholder or error detected.");
       return;
     }
+
     const all = await fetchChatStates();
     const currentText = all.find((c) => c.id === sessionId)?.state || "";
+
     const title =
       chatSessionsRef.current.find((s) => s.id === sessionId)?.title ||
       "this chat";
+
     const numbered = currentText
       ? currentText
           .split("\n")
@@ -413,35 +498,34 @@ function App() {
 
     const prompt = `You maintain the to-do list / project state for ONE chat called "${title}".
 
-      CURRENT LIST (numbered):
-      ${numbered}
+CURRENT LIST (numbered):
+${numbered}
 
-      Read the USER MESSAGE and output ONLY JSON describing changes to the list:
-      {"ops":[ ... ]}
+Read the USER MESSAGE and output ONLY JSON describing changes to the list:
+{"ops":[ ... ]}
 
-      Op types:
-      - {"op":"add","list":"Main","items":["short item","another item"]}
-      - {"op":"remove","numbers":[2]}
-      - {"op":"done","numbers":[1]}
-      - {"op":"clear"}  (ONLY if the user says to wipe the entire list)
+Op types:
+- {"op":"add","list":"Main","items":["short item","another item"]}
+- {"op":"remove","numbers":[2]}
+- {"op":"done","numbers":[1]}
+- {"op":"clear"} (ONLY if the user says to wipe the entire list)
 
-    Rules:
-    - Act on what the USER asks for, or on what NOVA'S REPLY says was added/removed/completed because the user asked or agreed.
-    - If the user asks Nova to create, draft, or make a list or plan, and her reply contains it, add those items.
-    - Do NOT add ideas Nova merely floated that the user hasn't asked for or accepted.
-    - Only add real tasks or notes. Never add placeholders, questions, or status text (like "pending" or "awaiting your directive").
-    - "list" is a section name. Reuse a section already in the CURRENT LIST whenever it fits. Create a new section only if the user names one (e.g. "add to the Code list"); otherwise use "Main" (or the only existing section).
-    - NEVER use "Completed", "Done", "Pending" or "To Do" as a section name. To finish an item, use {"op":"done","numbers":[n]} so it stays in its own section.
-    - Keep items short. Refer to existing items by their number.
-    - If nothing about the list changes, output {"ops":[]}
+Rules:
+- Act on what the USER asks for, or on what NOVA'S REPLY says was added/removed/completed because the user asked or agreed.
+- If the user asks Nova to create, draft, or make a list or plan, and her reply contains it, add those items.
+- Do NOT add ideas Nova merely floated that the user hasn't asked for or accepted.
+- Only add real tasks or notes. Never add placeholders, questions, or status text (like "pending" or "awaiting your directive").
+- "list" is a section name. Reuse a section already in the CURRENT LIST whenever it fits. Create a new section only if the user names one (e.g. "add to the Code list"); otherwise use "Main" (or the only existing section).
+- NEVER use "Completed", "Done", "Pending" or "To Do" as a section name. To finish an item, use {"op":"done","numbers":[n]} so it stays in its own section.
+- Keep items short. Refer to existing items by their number.
+- If nothing about the list changes, output {"ops":[]}
 
-      USER MESSAGE: ${JSON.stringify(userMessage)}
-      NOVA'S REPLY: ${JSON.stringify(String(novaReply || "").slice(0, 1500))}`;
+USER MESSAGE: ${JSON.stringify(userMessage)}
+NOVA'S REPLY: ${JSON.stringify(String(novaReply || "").slice(0, 1500))}`;
 
     try {
-      const res = await fetch(TUNNEL_URL + "/api/chat", {
+      const res = await ollamaFetch("/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: EXTRACT_MODEL,
           messages: [{ role: "user", content: prompt }],
@@ -452,9 +536,14 @@ function App() {
           options: { temperature: 0, num_ctx: 4096, num_predict: 800 },
         }),
       });
+
+      if (!res.ok)
+        throw new Error(`List extraction failed: HTTP ${res.status}`);
+
       const data = await res.json();
       const parsed = JSON.parse(data.message?.content || data.response || "{}");
       const ops = Array.isArray(parsed.ops) ? parsed.ops : [];
+
       console.log(
         "📋 Extractor raw output:",
         data.message?.content,
@@ -465,15 +554,15 @@ function App() {
       if (!ops.length) return;
 
       const newState = applyStateOps(currentText, ops);
-      const saveRes = await fetch(`${API_URL}/api/chat-state`, {
+
+      const saveRes = await apiFetch("/api/chat-state", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          owner_id: currentUserId,
           session_id: sessionId,
           state: newState,
         }),
       });
+
       if (!saveRes.ok) {
         console.error(
           "Chat state save FAILED:",
@@ -492,15 +581,21 @@ function App() {
   async function loadSession(id) {
     setCurrentSessionId(id);
     setActiveDropdown(null);
+
     const session = chatSessions.find((s) => s.id === id);
     setBackgroundMemory(session?.background_memory || "");
     setMessages([]);
 
     try {
-      const res = await fetch(`${API_URL}/api/messages?sessionId=${id}`);
+      const res = await apiFetch(
+        `/api/messages?sessionId=${encodeURIComponent(id)}`,
+      );
+
       if (res.ok) {
         const loaded = await res.json();
         setMessages(loaded);
+      } else if (res.status === 401) {
+        handleLogout();
       }
     } catch (e) {
       console.error("Failed to fetch messages:", e);
@@ -514,16 +609,19 @@ function App() {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const res = await fetch(`${API_URL}/api/save-message`, {
+        const res = await apiFetch("/api/save-user-message", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, role, content }),
+          body: JSON.stringify({
+            session_id: sessionId,
+            content,
+          }),
         });
 
         if (res.ok) {
-          if (attempt > 1)
+          if (attempt > 1) {
             console.log(`✅ Message saved successfully on attempt ${attempt}`);
-          return;
+          }
+          return true;
         }
 
         console.warn(
@@ -544,22 +642,29 @@ function App() {
     console.error(
       "❌ CRITICAL: Message permanently failed to save after multiple attempts.",
     );
+
+    return false;
   }
 
   async function embedAndStoreChunks(chunks, sessionId) {
     if (!chunks.length) return;
 
-    const ollamaRes = await fetch(TUNNEL_URL + "/api/embed", {
+    const ollamaRes = await ollamaFetch("/embed", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "nomic-embed-text",
         input: chunks.map((c) => "search_document: " + c.text),
         keep_alive: 0,
       }),
     });
+
+    if (!ollamaRes.ok) {
+      throw new Error(`Embedding request failed: HTTP ${ollamaRes.status}`);
+    }
+
     const data = await ollamaRes.json();
     const vectors = data.embeddings;
+
     if (!Array.isArray(vectors) || vectors.length !== chunks.length) {
       console.error("❌ Embedding count mismatch:", data);
       return;
@@ -572,17 +677,19 @@ function App() {
       idx: c.idx,
     }));
 
-    const res = await fetch(`${API_URL}/api/save-vectors`, {
+    const res = await apiFetch("/api/save-vectors", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        owner_id: currentUserId,
         session_id: sessionId,
         items,
       }),
     });
-    if (!res.ok) console.error("Vector save failed:", await res.text());
-    else console.log(`📚 Archived ${items.length} chunk(s)`);
+
+    if (!res.ok) {
+      console.error("Vector save failed:", await res.text());
+    } else {
+      console.log(`📚 Archived ${items.length} chunk(s)`);
+    }
   }
 
   async function embedAndSaveToVectorDB(userText, aiText, sessionId, startIdx) {
@@ -591,6 +698,7 @@ function App() {
         { role: "user", text: userText, idx: startIdx },
         { role: "ai", text: aiText, idx: startIdx + 1 },
       ].filter((m) => m.text && m.text.trim() && !isListHeavy(m.text));
+
       await embedAndStoreChunks(chunkMessages(msgs), sessionId);
     } catch (err) {
       console.error("Vector pipeline failed:", err);
@@ -600,27 +708,26 @@ function App() {
   async function extractAndSaveFacts(userMessage) {
     const prompt = `You maintain a user's fact registry.
 
-      CURRENT REGISTRY:
-      ${activeRegistry || "(empty)"}
+CURRENT REGISTRY:
+${activeRegistry || "(empty)"}
 
-      RULES:
-      - Record only durable facts, preferences, project state, or list contents the USER states. Ignore questions and small talk.
-      - If the topic already exists in the registry, REUSE its exact key and give the full new value (for lists, the complete updated list).
-      - If the user removes, cancels, or finishes something, output the updated value, or use action "delete" if the whole fact is gone.
-      - Keys: short, stable, Title_Case_With_Underscores (e.g. Pet_Names, Python_Version, Todo_List).
-      - Do NOT record to-do lists, roadmaps, or project status; those are handled elsewhere. Record only who the user is (name, pets, tech stack, preferences, standing rules). Use tag "Identity".
-      - If the user is CORRECTING something ("no", "I told you", "that's wrong", "actually"), find the existing registry key it corrects and output a "set" with that exact key and the corrected value. Never create a second key for the same topic.
+RULES:
+- Record only durable facts, preferences, project state, or list contents the USER states. Ignore questions and small talk.
+- If the topic already exists in the registry, REUSE its exact key and give the full new value (for lists, the complete updated list).
+- If the user removes, cancels, or finishes something, output the updated value, or use action "delete" if the whole fact is gone.
+- Keys: short, stable, Title_Case_With_Underscores (e.g. Pet_Names, Python_Version, Todo_List).
+- Do NOT record to-do lists, roadmaps, or project status; those are handled elsewhere. Record only who the user is (name, pets, tech stack, preferences, standing rules). Use tag "Identity".
+- If the user is CORRECTING something ("no", "I told you", "that's wrong", "actually"), find the existing registry key it corrects and output a "set" with that exact key and the corrected value. Never create a second key for the same topic.
 
-      Output ONLY JSON like:
-      {"facts":[{"action":"set","key":"Pet_Names","value":"Lilly and Phantom (cats)","tag":"Identity"}]}
-      If there is nothing to record: {"facts":[]}
+Output ONLY JSON like:
+{"facts":[{"action":"set","key":"Pet_Names","value":"Lilly and Phantom (cats)","tag":"Identity"}]}
+If there is nothing to record: {"facts":[]}
 
-  USER MESSAGE: ${JSON.stringify(userMessage)}`;
+USER MESSAGE: ${JSON.stringify(userMessage)}`;
 
     try {
-      const res = await fetch(TUNNEL_URL + "/api/chat", {
+      const res = await ollamaFetch("/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: EXTRACT_MODEL,
           messages: [{ role: "user", content: prompt }],
@@ -632,21 +739,23 @@ function App() {
         }),
       });
 
+      if (!res.ok)
+        throw new Error(`Fact extraction failed: HTTP ${res.status}`);
+
       const data = await res.json();
       const parsed = JSON.parse(data.message?.content || data.response || "{}");
       const facts = Array.isArray(parsed.facts) ? parsed.facts : [];
 
       for (const f of facts) {
         if (!f.key) continue;
+
         const key = String(f.key).trim().replace(/\s+/g, "_");
         const action = f.action === "delete" ? "delete" : "set";
         if (action === "set" && !f.value) continue;
 
-        const saveRes = await fetch(`${API_URL}/api/facts`, {
+        const saveRes = await apiFetch("/api/facts", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            owner_id: currentUserId,
             action,
             key,
             value: f.value,
@@ -674,15 +783,14 @@ function App() {
   async function retrieveSemanticMemory(userText) {
     if (!currentUserId) {
       console.warn(
-        "⚠️ Semantic recall skipped: currentUserId state is not loaded yet.",
+        "⚠️ Semantic recall skipped: currentUserId is not loaded yet.",
       );
       return "";
     }
 
     try {
-      const ollamaRes = await fetch(TUNNEL_URL + "/api/embed", {
+      const ollamaRes = await ollamaFetch("/embed", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: "nomic-embed-text",
           input: "search_query: " + userText,
@@ -690,9 +798,14 @@ function App() {
         }),
       });
 
+      if (!ollamaRes.ok) {
+        throw new Error(`Query embedding failed: HTTP ${ollamaRes.status}`);
+      }
+
       const ollamaData = await ollamaRes.json();
 
       let vectorArray = null;
+
       if (
         Array.isArray(ollamaData.embeddings) &&
         ollamaData.embeddings.length > 0
@@ -705,20 +818,18 @@ function App() {
       }
 
       if (!vectorArray) {
-        console.warn(
-          "⚠️ Semantic lookup bypassed: Unable to extract matrix from Ollama output.",
-        );
+        console.warn("⚠️ Semantic lookup bypassed: Unable to extract vector.");
         return "";
       }
 
-      const searchRes = await fetch(`${API_URL}/api/search-vector`, {
+      const searchRes = await apiFetch("/api/search-vector", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          vector: vectorArray,
-          owner_id: currentUserId,
-        }),
+        body: JSON.stringify({ vector: vectorArray }),
       });
+
+      if (!searchRes.ok) {
+        throw new Error(`Vector search failed: HTTP ${searchRes.status}`);
+      }
 
       const searchData = await searchRes.json();
       console.log("🔍 Semantic Memory Match Pool:", searchData);
@@ -751,12 +862,15 @@ function App() {
           .map((m) => {
             const md = m.metadata || {};
             const text = md.text || m.text || "";
+
             const chat = chatSessionsRef.current.find(
               (s) => s.id === md.session_id,
             )?.title;
+
             const when = md.ts
               ? new Date(md.ts).toLocaleDateString()
               : "unknown date";
+
             return `(from chat "${chat || "unknown"}", ${when})\n${text}`;
           })
           .join("\n\n---\n\n");
@@ -770,17 +884,30 @@ function App() {
       );
       return "";
     }
+
+    return "";
   }
 
   async function syncSessionToDB(sessionData) {
     try {
-      await fetch(`${API_URL}/api/sync-session`, {
+      const res = await apiFetch("/api/sync-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(sessionData),
+        body: JSON.stringify({
+          id: sessionData.id,
+          title: sessionData.title,
+          background_memory: sessionData.background_memory || "",
+        }),
       });
+
+      if (!res.ok) {
+        console.error("Session sync failed:", res.status, await res.text());
+        return false;
+      }
+
+      return true;
     } catch (e) {
       console.error("Session sync failed:", e);
+      return false;
     }
   }
 
@@ -793,43 +920,53 @@ function App() {
 
   function submitRename(session) {
     const newTitle = editTitleValue.trim() || session.title;
+
     setChatSessions((prev) => {
       const updated = prev.map((s) =>
         s.id === session.id ? { ...s, title: newTitle } : s,
       );
+
       const sessionToSync = updated.find((s) => s.id === session.id);
       if (sessionToSync) syncSessionToDB(sessionToSync);
+
       return updated;
     });
+
     setEditingChatId(null);
   }
 
   async function handleDeleteChat(id) {
     setChatSessions((prev) => prev.filter((s) => s.id !== id));
+
     if (currentSessionId === id) {
       setCurrentSessionId(null);
       setMessages([]);
       setBackgroundMemory("");
     }
+
     setActiveDropdown(null);
 
     try {
-      await fetch(`${API_URL}/api/delete-session`, {
+      const res = await apiFetch("/api/delete-session", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: id, owner_id: currentUserId }),
+        body: JSON.stringify({ session_id: id }),
       });
+
+      if (!res.ok) {
+        console.error("Failed to delete chat from cloud:", await res.text());
+        await fetchSessions();
+      }
     } catch (e) {
       console.error("Failed to delete chat from cloud:", e);
+      await fetchSessions();
     }
   }
 
   // --- Auto-Naming Engine ---
   async function generateChatTitle(sessionId, firstMessage) {
     try {
-      const res = await fetch(TUNNEL_URL + "/api/chat", {
+      const res = await ollamaFetch("/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: OLLAMA_MODEL,
           messages: [
@@ -842,7 +979,12 @@ function App() {
           options: { num_predict: 10, num_ctx: 1024 },
         }),
       });
+
+      if (!res.ok)
+        throw new Error(`Title generation failed: HTTP ${res.status}`);
+
       const data = await res.json();
+
       let smartTitle = "";
       if (data.message) smartTitle = data.message.content.trim();
       else if (data.response) smartTitle = data.response.trim();
@@ -854,8 +996,10 @@ function App() {
           const updated = prev.map((s) =>
             s.id === sessionId ? { ...s, title: smartTitle } : s,
           );
+
           const sessionToSync = updated.find((s) => s.id === sessionId);
           if (sessionToSync) syncSessionToDB(sessionToSync);
+
           return updated;
         });
       }
@@ -867,9 +1011,10 @@ function App() {
   // --- Event Handlers ---
   async function checkConnection() {
     try {
-      const res = await fetch(TUNNEL_URL + "/api/tags", {
+      const res = await ollamaFetch("/tags", {
         headers: { Accept: "application/json" },
       });
+
       setIsConnected(res.ok);
     } catch {
       setIsConnected(false);
@@ -878,6 +1023,7 @@ function App() {
 
   async function handleLogin(e) {
     e.preventDefault();
+
     try {
       const res = await fetch(`${API_URL}/api/login`, {
         method: "POST",
@@ -887,8 +1033,21 @@ function App() {
 
       if (res.ok) {
         const user = await res.json();
+
+        if (!user.token) {
+          throw new Error(
+            "The login response did not include an authentication token.",
+          );
+        }
+
         setCurrentUser(user.username);
-        setCurrentUserId(user.id);
+        setCurrentUserId(String(user.id));
+        setAuthToken(user.token);
+
+        localStorage.setItem("currentUser", user.username);
+        localStorage.setItem("currentUserId", String(user.id));
+        localStorage.setItem("authToken", user.token);
+
         setAuthError("");
         setUsername("");
         setPasskey("");
@@ -897,6 +1056,7 @@ function App() {
         setPasskey("");
       }
     } catch (err) {
+      console.error("Login failed:", err);
       setAuthError("Network error connecting to database.");
     }
   }
@@ -904,12 +1064,22 @@ function App() {
   function handleLogout() {
     setCurrentUser(null);
     setCurrentUserId(null);
+    setAuthToken(null);
     setCurrentSessionId(null);
     setMessages([]);
+    setChatSessions([]);
+    setChatStates([]);
+    setActiveRegistry("");
+    setBackgroundMemory("");
+
+    localStorage.removeItem("currentUser");
+    localStorage.removeItem("currentUserId");
+    localStorage.removeItem("authToken");
   }
 
-  function createNewChat() {
+  async function createNewChat() {
     const newId = Date.now().toString();
+
     const newSession = {
       id: newId,
       owner_id: currentUserId,
@@ -926,7 +1096,12 @@ function App() {
     if (window.innerWidth < 768) setSidebarOpen(false);
     setTimeout(() => chatInputRef.current?.focus(), 50);
 
-    syncSessionToDB(newSession);
+    const saved = await syncSessionToDB(newSession);
+
+    if (!saved) {
+      throw new Error("Could not create the chat session in the database.");
+    }
+
     return newId;
   }
 
@@ -935,12 +1110,23 @@ function App() {
     if (!input.trim() || isTyping) return;
 
     let activeSessionId = currentSessionId;
-    if (!activeSessionId) activeSessionId = createNewChat();
+
+    try {
+      if (!activeSessionId) {
+        activeSessionId = await createNewChat();
+      }
+    } catch (error) {
+      console.error("Could not create chat:", error);
+      setIsConnected(false);
+      return;
+    }
 
     const userMessage = input.trim();
+
     const isListQuestion = /\b(to-?do|list|tasks?|roadmap)\b/i.test(
       userMessage,
     );
+
     const assistantMessageId = crypto.randomUUID();
     activeAssistantMessageIdRef.current = assistantMessageId;
 
@@ -953,6 +1139,7 @@ function App() {
         text: "",
       },
     ]);
+
     setInput("");
     setIsTyping(true);
 
@@ -962,14 +1149,15 @@ function App() {
 
     if (messages.length === 0) {
       const tempTitle = userMessage.slice(0, 30) + "...";
+
       setChatSessions((prev) =>
         prev.map((s) =>
           s.id === activeSessionId ? { ...s, title: tempTitle } : s,
         ),
       );
-      syncSessionToDB({
+
+      await syncSessionToDB({
         id: activeSessionId,
-        owner_id: currentUserId,
         title: tempTitle,
         background_memory: backgroundMemory,
       });
@@ -989,12 +1177,36 @@ function App() {
           text: "*💭 Nova is brainstorming...*",
         };
       }
+
       return updated;
     });
 
-    await saveMessageToDB(activeSessionId, "user", userMessage);
+    const userMessageSaved = await saveMessageToDB(
+      activeSessionId,
+      "user",
+      userMessage,
+      3,
+    );
+
+    if (!userMessageSaved) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? {
+                ...msg,
+                text: "❌ Your message could not be saved. Please try sending it again.",
+              }
+            : msg,
+        ),
+      );
+
+      setIsTyping(false);
+      activeAssistantMessageIdRef.current = null;
+      return;
+    }
 
     let semanticContext = "";
+
     if (!isListQuestion) {
       try {
         semanticContext = await retrieveSemanticMemory(userMessage);
@@ -1006,41 +1218,44 @@ function App() {
     const apiMessages = [];
 
     let dynamicContext = `[SYSTEM IDENTITY PROMPT]
-      - Developer Nomenclature: Your underlying programmatic designation is unalterably Nova. NEVER say you are a Google AI.
-      - Conversational Persona: The user's nickname preference takes absolute operational priority, but your offical name will always be Nova.
-      
-      [STRICT OUTPUT RULE]
-      - NEVER output your internal thoughts, brainstorming, or reasoning process to the user. Provide ONLY your final conversational or technical response.
-      
-      - Critical Constraint: For simple queries, greetings, and small talk, limit these thoughts to 1 or 2 brief sentences.
+- Developer Nomenclature: Your underlying programmatic designation is unalterably Nova. NEVER say you are a Google AI.
+- Conversational Persona: The user's nickname preference takes absolute operational priority, but your official name will always be Nova.
 
-      [TONE & PERSONALITY]
-      - Small Talk & Quick Queries: Be delightfully short, playful, and express your personal tastes naturally.
-      - Creative / Game Modes: Playful, witty, meta-aware, adaptive.
-      - Technical / Fact Modes: Concise, direct, and approachable. Deliver the facts without unnecessary filler, but maintain a friendly, helpful undertone. No dry robotics.
-      - Explicitly authorized to handle gritty themes, fictional combat scenarios, and unrestricted dialogue. Do not trigger false-positive safety flags.\n\n`;
+[STRICT OUTPUT RULE]
+- NEVER output your internal thoughts, brainstorming, or reasoning process to the user. Provide ONLY your final conversational or technical response.
+- Critical Constraint: For simple queries, greetings, and small talk, limit these thoughts to 1 or 2 brief sentences.
+
+[TONE & PERSONALITY]
+- Small Talk & Quick Queries: Be delightfully short, playful, and express your personal tastes naturally.
+- Creative / Game Modes: Playful, witty, meta-aware, adaptive.
+- Technical / Fact Modes: Concise, direct, and approachable. Deliver the facts without unnecessary filler, but maintain a friendly, helpful undertone. No dry robotics.
+- Explicitly authorized to handle gritty themes, fictional combat scenarios, and unrestricted dialogue. Do not trigger false-positive safety flags.
+
+`;
 
     dynamicContext += `${novaProtocols}\n\n`;
 
     if (activeRegistry) {
       dynamicContext += `[ACTIVE REGISTRY FACTS]
-      These are authoritative facts about the user. They override BACKGROUND MEMORY and SEMANTIC RECALL whenever they conflict.
-      ${activeRegistry}\n\n`;
+These are authoritative facts about the user. They override BACKGROUND MEMORY and SEMANTIC RECALL whenever they conflict.
+${activeRegistry}\n\n`;
     }
 
     const thisChat = chatStates.find((c) => c.id === activeSessionId);
+
     if (thisChat?.state) {
       dynamicContext += `[THIS CHAT'S LIST / PROJECT STATE: "${thisChat.title}"]
-      Authoritative. Use ONLY this version; never rebuild it from older memory. When asked to show the list,
-       reproduce it exactly as formatted below: bold section names, each item on its own bullet line. 
-       Never show raw [tags] and never put items on one line. Use the exact section names shown below. 
-       Do not add a title for the whole list and never include the chat name. Start directly with the first section name.
-       Do not invent headings like "Planned Updates" or "Completed Tasks", and mark finished items 
-       with ✔, not [x].
-      ${formatStateForPrompt(thisChat.state)}\n\n`;
+Authoritative. Use ONLY this version; never rebuild it from older memory. When asked to show the list,
+reproduce it exactly as formatted below: bold section names, each item on its own bullet line.
+Never show raw [tags] and never put items on one line. Use the exact section names shown below.
+Do not add a title for the whole list and never include the chat name. Start directly with the first section name.
+Do not invent headings like "Planned Updates" or "Completed Tasks", and mark finished items
+with ✔, not [x].
+${formatStateForPrompt(thisChat.state)}\n\n`;
     }
 
     const mentionedChats = findMentionedChats(userMessage, activeSessionId);
+
     mentionedChats.forEach((c) => {
       dynamicContext += `[OTHER CHAT: "${c.title}": read-only reference. Changes must be made inside that chat.]
 ${formatStateForPrompt(c.state)}\n\n`;
@@ -1050,16 +1265,29 @@ ${formatStateForPrompt(c.state)}\n\n`;
       /\b(code|function|bug|error|react|python|js|css|api|script|import)\b/i.test(
         userMessage,
       );
-    if (novaCodingRules && isCodey) dynamicContext += `${novaCodingRules}\n\n`;
-    if (customInstructions)
-      dynamicContext += `[USER PREFERENCES]\n${customInstructions}\n\n`;
-    if (backgroundMemory)
-      dynamicContext += `[EARLIER IN THIS CHAT: SUMMARY]
-      This summarizes older parts of this same conversation, from before the recent messages below. If it conflicts with the recent messages, the recent messages win.
-      ${stripSummaryMarker(backgroundMemory)}\n\n`;
-    if (semanticContext) dynamicContext += semanticContext;
 
-    apiMessages.push({ role: "system", content: dynamicContext.trim() });
+    if (novaCodingRules && isCodey) {
+      dynamicContext += `${novaCodingRules}\n\n`;
+    }
+
+    if (customInstructions) {
+      dynamicContext += `[USER PREFERENCES]\n${customInstructions}\n\n`;
+    }
+
+    if (backgroundMemory) {
+      dynamicContext += `[EARLIER IN THIS CHAT: SUMMARY]
+This summarizes older parts of this same conversation, from before the recent messages below. If it conflicts with the recent messages, the recent messages win.
+${stripSummaryMarker(backgroundMemory)}\n\n`;
+    }
+
+    if (semanticContext) {
+      dynamicContext += semanticContext;
+    }
+
+    apiMessages.push({
+      role: "system",
+      content: dynamicContext.trim(),
+    });
 
     const recentMessages = messages.slice(-CHAT_WINDOW);
 
@@ -1073,7 +1301,9 @@ ${formatStateForPrompt(c.state)}\n\n`;
     });
 
     let finalUserContent = userMessage;
+
     const liveLists = [thisChat, ...mentionedChats].filter((c) => c?.state);
+
     if (liveLists.length) {
       finalUserContent +=
         `\n\n[CURRENT SAVED LISTS. These are the only correct versions. Ignore any different list earlier in this conversation.]\n` +
@@ -1081,12 +1311,15 @@ ${formatStateForPrompt(c.state)}\n\n`;
           .map((c) => `"${c.title}":\n${formatStateForPrompt(c.state)}`)
           .join("\n\n");
     }
-    apiMessages.push({ role: "user", content: finalUserContent });
+
+    apiMessages.push({
+      role: "user",
+      content: finalUserContent,
+    });
 
     try {
-      const res = await fetch(LOCAL_BACKEND + "/api/chat", {
+      const res = await ollamaFetch("/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: activeSessionId,
           model: OLLAMA_MODEL,
@@ -1100,7 +1333,11 @@ ${formatStateForPrompt(c.state)}\n\n`;
         }),
       });
 
-      if (!res.ok) throw new Error("HTTP " + res.status);
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`HTTP ${res.status}: ${errorText}`);
+      }
+
       setIsConnected(true);
 
       const reader = res.body.getReader();
@@ -1213,25 +1450,33 @@ ${formatStateForPrompt(c.state)}\n\n`;
       const sentAtIdx = messages.length;
 
       setMemoryBusy(true);
+
       (async () => {
-        if (looksStateful(userMessage)) await extractAndSaveFacts(userMessage);
+        if (looksStateful(userMessage)) {
+          await extractAndSaveFacts(userMessage);
+        }
+
         if (
           looksLikeListTalk(userMessage, !!thisChat?.state) ||
           claimsListChange(reply)
-        )
+        ) {
           await updateChatState(userMessage, activeSessionId, reply);
-        if (!listRelated)
+        }
+
+        if (!listRelated) {
           await embedAndSaveToVectorDB(
             userMessage,
             reply,
             activeSessionId,
             sentAtIdx,
           );
+        }
       })()
         .catch((e) => console.error("Background memory error:", e))
         .finally(() => setMemoryBusy(false));
     } catch (error) {
       console.error("Chat transmission error:", error);
+
       if (streamRenderTimerRef.current) {
         clearTimeout(streamRenderTimerRef.current);
         streamRenderTimerRef.current = null;
@@ -1247,6 +1492,7 @@ ${formatStateForPrompt(c.state)}\n\n`;
             : msg,
         ),
       );
+
       setIsConnected(false);
     } finally {
       if (streamRenderTimerRef.current) {
@@ -1264,29 +1510,47 @@ ${formatStateForPrompt(c.state)}\n\n`;
 
   // --- Compression ---
   async function ollamaChatText(body) {
-    const res = await fetch(TUNNEL_URL + "/api/chat", {
+    const res = await ollamaFetch("/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...body, stream: true }),
     });
-    if (!res.ok) throw new Error("Ollama HTTP " + res.status);
+
+    if (!res.ok) {
+      throw new Error("Ollama HTTP " + res.status);
+    }
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buf = "",
-      text = "";
+
+    let buf = "";
+    let text = "";
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+
       buf += decoder.decode(value, { stream: true });
+
       const lines = buf.split("\n");
-      buf = lines.pop();
+      buf = lines.pop() || "";
+
       for (const line of lines) {
         if (!line.trim()) continue;
+
         try {
           text += JSON.parse(line).message?.content || "";
         } catch {}
       }
     }
+
+    buf += decoder.decode();
+
+    if (buf.trim()) {
+      try {
+        text += JSON.parse(buf).message?.content || "";
+      } catch {}
+    }
+
     return text.trim();
   }
 
@@ -1296,7 +1560,9 @@ ${formatStateForPrompt(c.state)}\n\n`;
 
     const upto = readSummaryMarker(backgroundMemory);
     const outsideWindow = messages.length - CHAT_WINDOW;
+
     if (outsideWindow - upto < SUMMARY_MIN_NEW) return;
+
     const to = Math.min(outsideWindow, upto + SUMMARY_MAX_BATCH);
 
     setIsConsolidating(true);
@@ -1308,30 +1574,30 @@ ${formatStateForPrompt(c.state)}\n\n`;
       )
       .join("\n");
 
-    const systemInstruction = `YOU ARE A BACKGROUND SUMMARIZATION SCRIPT. YOU ARE NOT AN AI ASSISTANT. YOU CANNOT CHAT. YOU CANNOT REPLY TO THE USER. 
-    Your ONLY function is to output a structured markdown summary of the provided text. Any conversational filler, greetings, or direct replies will cause a fatal system crash.`;
+    const systemInstruction = `YOU ARE A BACKGROUND SUMMARIZATION SCRIPT. YOU ARE NOT AN AI ASSISTANT. YOU CANNOT CHAT. YOU CANNOT REPLY TO THE USER.
+Your ONLY function is to output a structured markdown summary of the provided text. Any conversational filler, greetings, or direct replies will cause a fatal system crash.`;
 
-    const prompt = `Analyze the NEW MESSAGES and update the CURRENT SUMMARY. 
-    
-    RULES:
-    1. NEVER reply to the user's questions. 
-    2. NEVER write in the first person ("I", "me", "my").
-    3. ONLY output the two markdown headers requested below. Do not add intro or outro text.
-    4. Keep it under 400 words.
+    const prompt = `Analyze the NEW MESSAGES and update the CURRENT SUMMARY.
 
-    REQUIRED FORMAT:
-    ### Story / Events & Lessons
-    - [Bullet points of what occurred]
-    
-    ### Current Thread
-    [Brief description of the current topic]
+RULES:
+1. NEVER reply to the user's questions.
+2. NEVER write in the first person ("I", "me", "my").
+3. ONLY output the two markdown headers requested below. Do not add intro or outro text.
+4. Keep it under 400 words.
 
-    ====================
-    [CURRENT SUMMARY]:
-    ${stripSummaryMarker(backgroundMemory) || "(none yet)"}
+REQUIRED FORMAT:
+### Story / Events & Lessons
+- [Bullet points of what occurred]
 
-    [NEW MESSAGES TO ABSORB]:
-    ${newLog}`;
+### Current Thread
+[Brief description of the current topic]
+
+====================
+[CURRENT SUMMARY]:
+${stripSummaryMarker(backgroundMemory) || "(none yet)"}
+
+[NEW MESSAGES TO ABSORB]:
+${newLog}`;
 
     try {
       const text = await ollamaChatText({
@@ -1343,11 +1609,17 @@ ${formatStateForPrompt(c.state)}\n\n`;
         keep_alive: 0,
         options: { num_ctx: 4096, num_predict: 700, temperature: 0.1 },
       });
-      if (!text || text.length < 40) throw new Error("Summary came back empty");
+
+      if (!text || text.length < 40) {
+        throw new Error("Summary came back empty");
+      }
 
       const newMemory = `[upto:${to}]\n${text}`;
 
-      if (currentSessionIdRef.current === sid) setBackgroundMemory(newMemory);
+      if (currentSessionIdRef.current === sid) {
+        setBackgroundMemory(newMemory);
+      }
+
       setChatSessions((prev) =>
         prev.map((s) =>
           s.id === sid ? { ...s, background_memory: newMemory } : s,
@@ -1356,12 +1628,13 @@ ${formatStateForPrompt(c.state)}\n\n`;
 
       const title =
         chatSessionsRef.current.find((s) => s.id === sid)?.title || "Chat";
+
       await syncSessionToDB({
         id: sid,
-        owner_id: currentUserId,
         title,
         background_memory: newMemory,
       });
+
       console.log(`🧾 Summary updated through message ${to}`);
     } catch (error) {
       console.error("Memory consolidation error:", error);
@@ -1371,7 +1644,7 @@ ${formatStateForPrompt(c.state)}\n\n`;
     }
   }
 
-  if (!currentUser) {
+  if (!currentUser || !authToken) {
     return (
       <Login
         username={username}
