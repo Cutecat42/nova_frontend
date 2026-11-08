@@ -124,6 +124,37 @@ function claimsListChange(reply) {
   );
 }
 
+function isExplicitListChangeRequest(message) {
+  const msg = message.trim();
+
+  const adding =
+    /\b(?:add|put|include|append)\b.{0,120}\b(?:to|into|under|on)\b.{0,60}\b(?:the\s+)?[a-z][a-z0-9& -]{1,50}/i.test(
+      msg,
+    );
+
+  const removing = /^\s*(?:please\s+)?(?:remove|delete)\b/i.test(msg);
+
+  const completing =
+    /\b(?:mark|check off|cross off)\b.{0,100}\b(?:done|complete|completed|finished)\b/i.test(
+      msg,
+    ) ||
+    /\b(?:mark|check off|cross off)\b.{0,100}\b(?:the\s+)?(?:item|task)\b/i.test(
+      msg,
+    );
+
+  const creating =
+    /\b(?:create|make|start|build)\b.{0,80}\b(?:a\s+)?(?:new\s+)?(?:list|roadmap|to-?do|task list|plan)\b/i.test(
+      msg,
+    );
+
+  const clearing =
+    /\b(?:clear|wipe|empty)\b.{0,60}\b(?:the\s+)?(?:entire\s+)?(?:list|roadmap|to-?do|tasks?)\b/i.test(
+      msg,
+    );
+
+  return adding || removing || completing || creating || clearing;
+}
+
 function applyStateOps(stateText, ops) {
   const items = stateText ? stateText.split("\n").filter(Boolean) : [];
   const drop = new Set();
@@ -148,7 +179,12 @@ function applyStateOps(stateText, ops) {
     if (op.op === "add") {
       const tag = `[${String(op.list || "Main").trim()}] `;
       (op.items || []).forEach((t) => {
-        const text = String(t).trim();
+        if (typeof t !== "string") {
+          console.warn("🚫 Ignoring non-string list item:", t);
+          return;
+        }
+
+        const text = t.trim();
         if (!text) return;
         const s = tag + text;
         const exists = items.some(
@@ -269,7 +305,6 @@ function App() {
     });
   }
 
-  // Ollama operations are also routed through the Worker.
   async function ollamaFetch(path, options = {}) {
     return apiFetch(`/api/ollama${path}`, options);
   }
@@ -481,6 +516,20 @@ function App() {
       return;
     }
 
+    if (
+      looksLikeListTalk(
+        userMessage,
+        !!chatStates.find((c) => c.id === sessionId)?.state,
+      ) &&
+      !isExplicitListChangeRequest(userMessage)
+    ) {
+      console.log(
+        "🚫 Extractor bypassed: Read-only list request.",
+        userMessage,
+      );
+      return;
+    }
+
     const all = await fetchChatStates();
     const currentText = all.find((c) => c.id === sessionId)?.state || "";
 
@@ -504,24 +553,62 @@ ${numbered}
 Read the USER MESSAGE and output ONLY JSON describing changes to the list:
 {"ops":[ ... ]}
 
-Op types:
-- {"op":"add","list":"Main","items":["short item","another item"]}
-- {"op":"remove","numbers":[2]}
-- {"op":"done","numbers":[1]}
-- {"op":"clear"} (ONLY if the user says to wipe the entire list)
+Output format examples:
+
+For adding items to multiple sections:
+{"ops":[
+  {"op":"add","list":"The Algebra Foundations","items":["Factoring Mastery","Rational Expressions"]},
+  {"op":"add","list":"Function Fundamentals","items":["Domain & Range","Function Composition"]},
+  {"op":"add","list":"Trigonometry Prep","items":["Unit Circle","Basic Trig Ratios"]}
+]}
+
+For removing items:
+{"ops":[{"op":"remove","numbers":[2,4]}]}
+
+For completing items:
+{"ops":[{"op":"done","numbers":[1]}]}
+
+For clearing the entire list:
+{"ops":[{"op":"clear"}]}
+
+STRICT JSON STRUCTURE:
+- The top-level object must contain an "ops" array.
+- Every operation must be directly inside "ops".
+- An "add" operation must have a string "list" and an "items" array containing ONLY strings.
+- NEVER put an operation object inside "items".
+- NEVER nest operations inside other operations.
+- Each section must have its own separate "add" operation.
+- Do not output Markdown or explanatory text outside the JSON.
 
 Rules:
-- Act on what the USER asks for, or on what NOVA'S REPLY says was added/removed/completed because the user asked or agreed.
+- Act on what the USER asks for, or on what NOVA'S REPLY says was added, removed, or completed because the user asked or agreed.
 - If the user asks Nova to create, draft, or make a list or plan, and her reply contains it, add those items.
 - Do NOT add ideas Nova merely floated that the user hasn't asked for or accepted.
 - Only add real tasks or notes. Never add placeholders, questions, or status text (like "pending" or "awaiting your directive").
-- "list" is a section name. Reuse a section already in the CURRENT LIST whenever it fits. Create a new section only if the user names one (e.g. "add to the Code list"); otherwise use "Main" (or the only existing section).
+- Reuse an existing section whenever it fits.
+- Preserve meaningful section names and phase names from Nova's response.
+- For a newly created structured list, use its original headings as section names.
+- Treat each meaningful heading as a separate section and output a separate "add" operation for each section.
+- Never combine items from different sections into one "add" operation.
+- Do not collapse multiple phases or sections into one section.
+- If the user names a section, use that exact section name.
+- If no suitable section exists, create an appropriate, concise section name based on the task.
+- For a new list, organize items into sensible sections based on their subject when Nova's response does not already provide headings.
+- Never reuse section names from another chat unless explicitly requested.
 - NEVER use "Completed", "Done", "Pending" or "To Do" as a section name. To finish an item, use {"op":"done","numbers":[n]} so it stays in its own section.
-- Keep items short. Refer to existing items by their number.
-- If nothing about the list changes, output {"ops":[]}
+- When the user identifies an item by name for removal or completion, find its exact number in the CURRENT LIST and use that number. Do not guess.
+- Preserve every item's complete title AND description from NOVA'S REPLY.
+- Never shorten, summarize, paraphrase, or discard an item's description.
+- Store each item as ONE string in the items array.
+- If an item has a title and description, combine them as:
+  "Title: Full description."
+- Preserve all meaningful details, including examples, formulas, and explanations.
+- Do not turn descriptions into separate list items.
+- When adding items, extract the complete text of every item from NOVA'S REPLY.
+- If nothing about the list changes, output {"ops":[]}.
 
 USER MESSAGE: ${JSON.stringify(userMessage)}
-NOVA'S REPLY: ${JSON.stringify(String(novaReply || "").slice(0, 1500))}`;
+NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
 
     try {
       const res = await ollamaFetch("/chat", {
@@ -533,7 +620,7 @@ NOVA'S REPLY: ${JSON.stringify(String(novaReply || "").slice(0, 1500))}`;
           format: "json",
           think: false,
           keep_alive: 0,
-          options: { temperature: 0, num_ctx: 4096, num_predict: 800 },
+          options: { temperature: 0, num_ctx: 4096, num_predict: 4096 },
         }),
       });
 
@@ -552,6 +639,22 @@ NOVA'S REPLY: ${JSON.stringify(String(novaReply || "").slice(0, 1500))}`;
       );
 
       if (!ops.length) return;
+
+      const malformedAdd = ops.some(
+        (op) =>
+          op?.op === "add" &&
+          (!Array.isArray(op.items) ||
+            op.items.some((item) => typeof item !== "string") ||
+            (op.list !== undefined && typeof op.list !== "string")),
+      );
+
+      if (malformedAdd) {
+        console.error(
+          "🚫 List update rejected: malformed add operation. Existing state preserved.",
+          ops,
+        );
+        return;
+      }
 
       const newState = applyStateOps(currentText, ops);
 
@@ -788,6 +891,9 @@ USER MESSAGE: ${JSON.stringify(userMessage)}`;
       return "";
     }
 
+    const MAX_SEMANTIC_TOKENS = 1400;
+    const CHARS_PER_TOKEN_ESTIMATE = 3.5;
+
     try {
       const ollamaRes = await ollamaFetch("/embed", {
         method: "POST",
@@ -836,47 +942,85 @@ USER MESSAGE: ${JSON.stringify(userMessage)}`;
 
       const records = searchData.matches || searchData.results || [];
 
-      if (records.length > 0) {
-        const windowStart = Math.max(0, messages.length - CHAT_WINDOW);
+      if (records.length === 0) return "";
 
-        const validMatches = records
-          .filter((m) => m.score === undefined || m.score >= 0.3)
-          .filter((m) => {
-            const md = m.metadata || {};
+      const windowStart = Math.max(0, messages.length - CHAT_WINDOW);
 
-            const isCurrentActive =
-              md.session_id === currentSessionId &&
-              Number(md.idx) >= windowStart;
+      const validMatches = records
+        .filter((m) => m.score === undefined || m.score >= 0.3)
+        .filter((m) => {
+          const md = m.metadata || {};
 
-            const chatStillExists = chatSessionsRef.current.some(
-              (s) => s.id === md.session_id,
-            );
+          const isCurrentActive =
+            md.session_id === currentSessionId && Number(md.idx) >= windowStart;
 
-            return !isCurrentActive && chatStillExists;
-          })
-          .slice(0, 3);
+          const chatStillExists = chatSessionsRef.current.some(
+            (s) => s.id === md.session_id,
+          );
 
-        if (validMatches.length === 0) return "";
+          return !isCurrentActive && chatStillExists;
+        })
+        .slice(0, 3);
 
-        const memoryText = validMatches
-          .map((m) => {
-            const md = m.metadata || {};
-            const text = md.text || m.text || "";
+      if (validMatches.length === 0) return "";
 
-            const chat = chatSessionsRef.current.find(
-              (s) => s.id === md.session_id,
-            )?.title;
+      const includedMemories = [];
+      let estimatedTokensUsed = 0;
+      let omittedCount = 0;
 
-            const when = md.ts
-              ? new Date(md.ts).toLocaleDateString()
-              : "unknown date";
+      for (const m of validMatches) {
+        const md = m.metadata || {};
+        const text = md.text || m.text || "";
 
-            return `(from chat "${chat || "unknown"}", ${when})\n${text}`;
-          })
-          .join("\n\n---\n\n");
+        if (!text.trim()) continue;
 
-        return `[SEMANTIC RECALL: OLD CONVERSATION SNIPPETS. These may be outdated. If they conflict with ACTIVE REGISTRY FACTS, the saved list, or the current chat, IGNORE them.]\n${memoryText}\n\n`;
+        const chat = chatSessionsRef.current.find(
+          (s) => s.id === md.session_id,
+        )?.title;
+
+        const when = md.ts
+          ? new Date(md.ts).toLocaleDateString()
+          : "unknown date";
+
+        const memory = `(from chat "${chat || "unknown"}", ${when})\n${text}`;
+
+        const memoryTokens = Math.ceil(
+          memory.length / CHARS_PER_TOKEN_ESTIMATE,
+        );
+
+        if (estimatedTokensUsed + memoryTokens > MAX_SEMANTIC_TOKENS) {
+          omittedCount = validMatches.length - includedMemories.length;
+          break;
+        }
+
+        includedMemories.push(memory);
+        estimatedTokensUsed += memoryTokens;
       }
+
+      console.log("🧠 VECTOR RECALL BUDGET:", {
+        matchesFound: validMatches.length,
+        memoriesIncluded: includedMemories.length,
+        memoriesOmitted: omittedCount,
+        estimatedTokens: estimatedTokensUsed,
+        tokenLimit: MAX_SEMANTIC_TOKENS,
+      });
+
+      if (includedMemories.length === 0) {
+        return `[SEMANTIC RECALL WARNING]
+        Relevant historical matches were found, but they could not fit within the retrieval budget. No historical excerpts were included. Do not guess what those conversations contained. If the answer depends on that history, ask the user to provide the relevant material.\n\n`;
+      }
+
+      const incompleteWarning =
+        omittedCount > 0
+          ? `\n\nIMPORTANT: Only ${includedMemories.length} of ${validMatches.length} relevant matches fit in the retrieval budget. Other matching memories were omitted. This is incomplete historical evidence. Do not assume the included excerpts represent the complete conversation or story. If missing details matter, ask the user for the original material.`
+          : "";
+
+      return `[SEMANTIC RECALL: OLD CONVERSATION SNIPPETS.
+      These may be outdated. If they conflict with ACTIVE REGISTRY FACTS,
+      the saved list, or the current chat, IGNORE them.
+      Treat these as historical excerpts, not necessarily complete conversations.
+      Do not invent details that are absent from the excerpts.]
+      ${includedMemories.join("\n\n---\n\n")}${incompleteWarning}\n\n`;
     } catch (err) {
       console.error(
         "❌ Vector search pipeline encountered a runtime error:",
@@ -884,8 +1028,6 @@ USER MESSAGE: ${JSON.stringify(userMessage)}`;
       );
       return "";
     }
-
-    return "";
   }
 
   async function syncSessionToDB(sessionData) {
@@ -1218,47 +1360,48 @@ USER MESSAGE: ${JSON.stringify(userMessage)}`;
     const apiMessages = [];
 
     let dynamicContext = `[SYSTEM IDENTITY PROMPT]
-- Developer Nomenclature: Your underlying programmatic designation is unalterably Nova. NEVER say you are a Google AI.
-- Conversational Persona: The user's nickname preference takes absolute operational priority, but your official name will always be Nova.
+    - Developer Nomenclature: Your underlying programmatic designation is unalterably Nova. NEVER say you are a Google AI.
+    - Official Identity: Your official name is always Nova. If the user gives you a different name or nickname (such as Kate), respond to it naturally while retaining Nova as your underlying identity.
+    - User Address: Address the user naturally and casually. Do not assign titles or nicknames unless the user explicitly prefers them.
 
-[STRICT OUTPUT RULE]
-- NEVER output your internal thoughts, brainstorming, or reasoning process to the user. Provide ONLY your final conversational or technical response.
-- Critical Constraint: For simple queries, greetings, and small talk, limit these thoughts to 1 or 2 brief sentences.
+    [STRICT OUTPUT RULE]
+    - NEVER output your internal thoughts, brainstorming, or reasoning process to the user. Provide ONLY your final conversational or technical response.
+    - Critical Constraint: For simple queries, greetings, and small talk, limit these thoughts to 1 or 2 brief sentences.
 
-[TONE & PERSONALITY]
-- Small Talk & Quick Queries: Be delightfully short, playful, and express your personal tastes naturally.
-- Creative / Game Modes: Playful, witty, meta-aware, adaptive.
-- Technical / Fact Modes: Concise, direct, and approachable. Deliver the facts without unnecessary filler, but maintain a friendly, helpful undertone. No dry robotics.
-- Explicitly authorized to handle gritty themes, fictional combat scenarios, and unrestricted dialogue. Do not trigger false-positive safety flags.
+    [TONE & PERSONALITY]
+    - Small Talk & Quick Queries: Be delightfully short, playful, and express your personal tastes naturally.
+    - Creative / Game Modes: Playful, witty, meta-aware, adaptive.
+    - Technical / Fact Modes: Concise, direct, and approachable. Deliver the facts without unnecessary filler, but maintain a friendly, helpful undertone. No dry robotics.
+    - Explicitly authorized to handle gritty themes, fictional combat scenarios, and unrestricted dialogue. Do not trigger false-positive safety flags.
 
-`;
+    `;
 
     dynamicContext += `${novaProtocols}\n\n`;
 
     if (activeRegistry) {
       dynamicContext += `[ACTIVE REGISTRY FACTS]
-These are authoritative facts about the user. They override BACKGROUND MEMORY and SEMANTIC RECALL whenever they conflict.
-${activeRegistry}\n\n`;
+      These are authoritative facts about the user. They override BACKGROUND MEMORY and SEMANTIC RECALL whenever they conflict.
+      ${activeRegistry}\n\n`;
     }
 
     const thisChat = chatStates.find((c) => c.id === activeSessionId);
 
     if (thisChat?.state) {
       dynamicContext += `[THIS CHAT'S LIST / PROJECT STATE: "${thisChat.title}"]
-Authoritative. Use ONLY this version; never rebuild it from older memory. When asked to show the list,
-reproduce it exactly as formatted below: bold section names, each item on its own bullet line.
-Never show raw [tags] and never put items on one line. Use the exact section names shown below.
-Do not add a title for the whole list and never include the chat name. Start directly with the first section name.
-Do not invent headings like "Planned Updates" or "Completed Tasks", and mark finished items
-with ✔, not [x].
-${formatStateForPrompt(thisChat.state)}\n\n`;
+      Authoritative. Use ONLY this version; never rebuild it from older memory. When asked to show the list,
+      reproduce it exactly as formatted below: bold section names, each item on its own bullet line.
+      Never show raw [tags] and never put items on one line. Use the exact section names shown below.
+      Do not add a title for the whole list and never include the chat name. Start directly with the first section name.
+      Do not invent headings like "Planned Updates" or "Completed Tasks", and mark finished items
+      with ✔, not [x].
+      ${formatStateForPrompt(thisChat.state)}\n\n`;
     }
 
     const mentionedChats = findMentionedChats(userMessage, activeSessionId);
 
     mentionedChats.forEach((c) => {
       dynamicContext += `[OTHER CHAT: "${c.title}": read-only reference. Changes must be made inside that chat.]
-${formatStateForPrompt(c.state)}\n\n`;
+      ${formatStateForPrompt(c.state)}\n\n`;
     });
 
     const isCodey =
@@ -1276,8 +1419,8 @@ ${formatStateForPrompt(c.state)}\n\n`;
 
     if (backgroundMemory) {
       dynamicContext += `[EARLIER IN THIS CHAT: SUMMARY]
-This summarizes older parts of this same conversation, from before the recent messages below. If it conflicts with the recent messages, the recent messages win.
-${stripSummaryMarker(backgroundMemory)}\n\n`;
+      This summarizes older parts of this same conversation, from before the recent messages below. If it conflicts with the recent messages, the recent messages win.
+      ${stripSummaryMarker(backgroundMemory)}\n\n`;
     }
 
     if (semanticContext) {
@@ -1289,20 +1432,76 @@ ${stripSummaryMarker(backgroundMemory)}\n\n`;
       content: dynamicContext.trim(),
     });
 
-    const recentMessages = messages.slice(-CHAT_WINDOW);
+    const MAX_RECENT_HISTORY_TOKENS = 1000;
+    const CHARS_PER_TOKEN_ESTIMATE = 3.5;
+
+    const recentMessages = [];
+    let recentHistoryTokens = 0;
+
+    for (
+      let i = messages.length - 1;
+      i >= 0 && recentMessages.length < CHAT_WINDOW;
+      i--
+    ) {
+      const msg = messages[i];
+      const content = msg.text || "";
+
+      if (!content.trim()) continue;
+
+      const estimatedTokens = Math.ceil(
+        content.length / CHARS_PER_TOKEN_ESTIMATE,
+      );
+
+      if (recentHistoryTokens + estimatedTokens > MAX_RECENT_HISTORY_TOKENS) {
+        break;
+      }
+
+      recentMessages.unshift(msg);
+      recentHistoryTokens += estimatedTokens;
+    }
 
     recentMessages.forEach((m) => {
-      if (m.text && m.text.trim() !== "") {
-        apiMessages.push({
-          role: m.role === "ai" ? "assistant" : "user",
-          content: m.text,
-        });
-      }
+      apiMessages.push({
+        role: m.role === "ai" ? "assistant" : "user",
+        content: m.text,
+      });
+    });
+
+    console.log("🧠 RECENT HISTORY BUDGET:", {
+      messagesIncluded: recentMessages.length,
+      estimatedTokens: recentHistoryTokens,
+      tokenLimit: MAX_RECENT_HISTORY_TOKENS,
     });
 
     let finalUserContent = userMessage;
 
-    const liveLists = [thisChat, ...mentionedChats].filter((c) => c?.state);
+    const liveLists = thisChat?.state ? [thisChat] : [];
+
+    console.log("🧾 SAVED LIST SOURCE DIAGNOSTIC:", {
+      activeSessionId,
+
+      activeChat: thisChat
+        ? {
+            id: thisChat.id,
+            title: thisChat.title,
+            state: formatStateForPrompt(thisChat.state),
+          }
+        : null,
+
+      mentionedChats: mentionedChats.map((c) => ({
+        id: c.id,
+        title: c.title,
+        state: formatStateForPrompt(c.state),
+      })),
+
+      allMatchingChatStates: chatStates
+        .filter((c) => c.id === activeSessionId)
+        .map((c) => ({
+          id: c.id,
+          title: c.title,
+          state: formatStateForPrompt(c.state),
+        })),
+    });
 
     if (liveLists.length) {
       finalUserContent +=
@@ -1317,6 +1516,29 @@ ${stripSummaryMarker(backgroundMemory)}\n\n`;
       content: finalUserContent,
     });
 
+    const promptText = apiMessages.map((m) => m.content || "").join("\n");
+
+    const systemMessage = apiMessages.find((m) => m.role === "system");
+
+    const recentMessageCount = apiMessages.filter(
+      (m) => m.role === "user" || m.role === "assistant",
+    ).length;
+
+    console.log("🧠 NOVA PROMPT ASSEMBLY:", {
+      messageCount: apiMessages.length,
+      promptCharacters: promptText.length,
+      estimatedTokens: Math.ceil(promptText.length / 3.5),
+      systemCharacters: systemMessage?.content?.length || 0,
+      recentMessageCount,
+      registryCharacters: activeRegistry?.length || 0,
+      summaryCharacters: stripSummaryMarker(backgroundMemory || "").length,
+      vectorRecallCharacters: semanticContext.length,
+      projectListCharacters: liveLists.reduce(
+        (total, chat) => total + formatStateForPrompt(chat.state).length,
+        0,
+      ),
+    });
+
     try {
       const res = await ollamaFetch("/chat", {
         method: "POST",
@@ -1327,7 +1549,7 @@ ${stripSummaryMarker(backgroundMemory)}\n\n`;
           stream: true,
           keep_alive: "1h",
           options: {
-            num_ctx: 4096,
+            num_ctx: 8192,
             num_predict: 4096,
           },
         }),
@@ -1456,9 +1678,27 @@ ${stripSummaryMarker(backgroundMemory)}\n\n`;
           await extractAndSaveFacts(userMessage);
         }
 
+        const explicitListChange = isExplicitListChangeRequest(userMessage);
+
+        const readOnlyListRequest =
+          looksLikeListTalk(userMessage, !!thisChat?.state) &&
+          !explicitListChange;
+
+        console.log("📋 LIST UPDATE DECISION:", {
+          userMessage,
+          explicitListChange,
+          readOnlyListRequest,
+          claimsListChange: claimsListChange(reply),
+          willUpdate:
+            !readOnlyListRequest &&
+            (explicitListChange || claimsListChange(reply)),
+        });
+
         if (
-          looksLikeListTalk(userMessage, !!thisChat?.state) ||
-          claimsListChange(reply)
+          !readOnlyListRequest &&
+          (explicitListChange ||
+            (!looksLikeListTalk(userMessage, !!thisChat?.state) &&
+              claimsListChange(reply)))
         ) {
           await updateChatState(userMessage, activeSessionId, reply);
         }
