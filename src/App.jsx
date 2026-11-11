@@ -285,6 +285,24 @@ function App() {
 
   const chatSessionsRef = useRef(chatSessions);
   const previousSessionRef = useRef(null);
+  const sessionExpiredRef = useRef(false);
+
+  // --- Un-authenticated API helper ---
+  function handleSessionExpired() {
+    if (sessionExpiredRef.current) return;
+
+    sessionExpiredRef.current = true;
+
+    setAuthToken(null);
+    setCurrentUser(null);
+    setCurrentUserId(null);
+
+    localStorage.removeItem("currentUser");
+    localStorage.removeItem("currentUserId");
+    localStorage.removeItem("authToken");
+
+    setAuthError("Your session expired. Please log in again.");
+  }
 
   // --- Authenticated API helper ---
   async function apiFetch(path, options = {}) {
@@ -299,10 +317,16 @@ function App() {
       headers.set("Content-Type", "application/json");
     }
 
-    return fetch(`${API_URL}${path}`, {
+    const res = await fetch(`${API_URL}${path}`, {
       ...options,
       headers,
     });
+
+    if (res.status === 401) {
+      handleSessionExpired();
+    }
+
+    return res;
   }
 
   async function ollamaFetch(path, options = {}) {
@@ -328,11 +352,25 @@ function App() {
       localStorage.setItem("currentUserId", currentUserId);
       localStorage.setItem("authToken", authToken);
 
-      fetchSessions();
-      fetchRegistryFacts();
-      fetchChatStates();
-      checkConnection();
-    } else {
+      async function initializeAuthenticatedSession() {
+        const sessions = await fetchSessions();
+
+        fetchRegistryFacts();
+        fetchChatStates();
+        checkConnection();
+
+        const previousSessionId = currentSessionIdRef.current;
+
+        if (
+          previousSessionId &&
+          sessions.some((s) => String(s.id) === String(previousSessionId))
+        ) {
+          await loadSession(previousSessionId);
+        }
+      }
+
+      initializeAuthenticatedSession();
+    } else if (!sessionExpiredRef.current) {
       localStorage.removeItem("currentUser");
       localStorage.removeItem("currentUserId");
       localStorage.removeItem("authToken");
@@ -414,13 +452,17 @@ function App() {
   async function fetchSessions() {
     try {
       const res = await apiFetch("/api/sessions");
+
       if (res.ok) {
-        setChatSessions(await res.json());
-      } else if (res.status === 401) {
-        handleLogout();
+        const sessions = await res.json();
+        setChatSessions(sessions);
+        return sessions;
       }
+
+      return [];
     } catch (e) {
       console.error("Failed to fetch sessions from cloud:", e);
+      return [];
     }
   }
 
@@ -441,8 +483,6 @@ function App() {
         }
 
         setActiveRegistry(text.trim());
-      } else if (res.status === 401) {
-        handleLogout();
       } else {
         console.error("Registry fetch failed:", res.status, await res.text());
       }
@@ -456,7 +496,6 @@ function App() {
       const res = await apiFetch("/api/chat-state");
 
       if (!res.ok) {
-        if (res.status === 401) handleLogout();
         console.error("Chat state fetch failed:", res.status, await res.text());
         return [];
       }
@@ -682,29 +721,35 @@ NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
   }
 
   async function loadSession(id) {
-    setCurrentSessionId(id);
     setActiveDropdown(null);
-
-    const session = chatSessions.find((s) => s.id === id);
-    setBackgroundMemory(session?.background_memory || "");
-    setMessages([]);
 
     try {
       const res = await apiFetch(
         `/api/messages?sessionId=${encodeURIComponent(id)}`,
       );
 
-      if (res.ok) {
-        const loaded = await res.json();
-        setMessages(loaded);
-      } else if (res.status === 401) {
-        handleLogout();
+      if (res.status === 401) {
+        return;
+      }
+
+      if (!res.ok) {
+        console.error("Failed to load session:", res.status);
+        return;
+      }
+
+      const loaded = await res.json();
+      const session = chatSessions.find((s) => String(s.id) === String(id));
+
+      setCurrentSessionId(id);
+      setBackgroundMemory(session?.background_memory || "");
+      setMessages(loaded);
+
+      if (window.innerWidth < 768) {
+        setSidebarOpen(false);
       }
     } catch (e) {
       console.error("Failed to fetch messages:", e);
     }
-
-    if (window.innerWidth < 768) setSidebarOpen(false);
   }
 
   async function saveMessageToDB(sessionId, role, content, maxRetries = 3) {
@@ -719,6 +764,11 @@ NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
             content,
           }),
         });
+
+        if (res.status === 401) {
+          console.warn("Session expired. Message save interrupted.");
+          return false;
+        }
 
         if (res.ok) {
           if (attempt > 1) {
@@ -1182,6 +1232,8 @@ USER MESSAGE: ${JSON.stringify(userMessage)}`;
           );
         }
 
+        sessionExpiredRef.current = false;
+
         setCurrentUser(user.username);
         setCurrentUserId(String(user.id));
         setAuthToken(user.token);
@@ -1331,6 +1383,7 @@ USER MESSAGE: ${JSON.stringify(userMessage)}`;
     );
 
     if (!userMessageSaved) {
+      setInput(userMessage);
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMessageId
