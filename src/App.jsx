@@ -132,7 +132,7 @@ function App() {
   const API_URL = "https://nova-api.musical-kitty.workers.dev";
 
   const OLLAMA_MODEL = "Nova";
-  const EXTRACT_MODEL = "llama3.2:3b";
+  const EXTRACT_MODEL = "qwen2.5:7b";
 
   // --- Auth State ---
   const [currentUser, setCurrentUser] = useState(
@@ -182,6 +182,8 @@ function App() {
   const scrollContainerRef = useRef(null);
   const streamRenderTimerRef = useRef(null);
   const activeAssistantMessageIdRef = useRef(null);
+
+  const listUpdateRef = useRef(Promise.resolve());
 
   const chatSessionsRef = useRef(chatSessions);
   const previousSessionRef = useRef(null);
@@ -474,8 +476,8 @@ function App() {
           stream: false,
           format: "json",
           think: false,
-          keep_alive: 0,
-          options: { temperature: 0, num_ctx: 4096, num_predict: 4096 },
+          keep_alive: "10m",
+          options: { temperature: 0, num_ctx: 8192, num_predict: 4096 },
         }),
       });
 
@@ -1045,7 +1047,9 @@ function App() {
 
     dynamicContext += `${novaProtocols}\n\n`;
 
-    const thisChat = chatStates.find((c) => c.id === activeSessionId);
+    await listUpdateRef.current;
+    const freshStates = await fetchChatStates();
+    const thisChat = freshStates.find((c) => c.id === activeSessionId);
 
     if (thisChat?.state) {
       dynamicContext += `[THIS CHAT'S LIST / PROJECT STATE: "${thisChat.title}"]
@@ -1337,7 +1341,12 @@ function App() {
             (!looksLikeListTalk(userMessage, !!thisChat?.state) &&
               claimsListChange(reply)))
         ) {
-          await updateChatState(userMessage, activeSessionId, reply);
+          listUpdateRef.current = updateChatState(
+            userMessage,
+            activeSessionId,
+            reply,
+          );
+          await listUpdateRef.current;
         }
 
         await retainMemory(userMessage, reply, activeSessionId, currentUserId);
