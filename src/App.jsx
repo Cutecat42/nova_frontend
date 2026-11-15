@@ -1200,8 +1200,8 @@ function App() {
           stream: true,
           keep_alive: "1h",
           options: {
-            num_ctx: 8192,
-            num_predict: 4096,
+            num_ctx: 16384,
+            num_predict: 8192,
           },
         }),
       });
