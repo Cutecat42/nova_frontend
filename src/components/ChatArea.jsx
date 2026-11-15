@@ -353,7 +353,7 @@ function ChatArea({
             disabled={isTyping}
             placeholder={isTyping ? "Nova is thinking..." : "Message Nova..."}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 e.target.style.height = "50px";
                 handleSendMessage(e);
