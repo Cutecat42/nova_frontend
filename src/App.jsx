@@ -4,13 +4,6 @@ import Sidebar from "./components/Sidebar.jsx";
 import ChatArea from "./components/ChatArea.jsx";
 import { novaCodingRules, novaProtocols } from "./novaRules.js";
 
-function looksStateful(message) {
-  if (message.trim().split(/\s+/).length < 3) return false;
-  return /\b(my|i'm|i am|i have|i've|i use|i prefer|i like|i love|i hate|i want|i need|call me|remember|from now on|always|never|let's|change|switch|delete|forget|i told you|that's wrong|that is wrong|not right|actually|no,|wrong|correction|you forgot|you got .{0,20} wrong)\b/i.test(
-    message,
-  );
-}
-
 // ---------- Memory settings ----------
 const CHAT_WINDOW = 20;
 
