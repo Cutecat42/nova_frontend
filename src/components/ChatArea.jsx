@@ -226,39 +226,8 @@ function ChatArea({
                 resize: "vertical",
                 boxSizing: "border-box",
                 fontFamily: "inherit",
+                background: "#f1f3f4",
                 color: "#202124",
-              }}
-            />
-          </div>
-          <div style={{ flex: 1 }}>
-            <div
-              style={{
-                fontWeight: "bold",
-                marginBottom: "8px",
-                fontSize: "13px",
-                color: "#5f6368",
-              }}
-            >
-              Active Session Memory (Auto-Compacts)
-            </div>
-            <textarea
-              readOnly
-              value={
-                backgroundMemory ||
-                "Memory is currently empty. (Nova smoothly rolls older messages into a summary in the background)."
-              }
-              style={{
-                width: "100%",
-                height: "80px",
-                padding: "10px",
-                borderRadius: "12px",
-                border: "1px solid #ccc",
-                resize: "vertical",
-                boxSizing: "border-box",
-                fontFamily: "inherit",
-                background: "#e8eaed",
-                color: "#3c4043",
-                fontSize: "13px",
               }}
             />
           </div>
@@ -380,12 +349,7 @@ function ChatArea({
           <textarea
             ref={chatInputRef}
             value={input}
-            onChange={(e) => {
-              setInput(e.target.value);
-              e.target.style.height = "50px";
-              e.target.style.height =
-                Math.min(e.target.scrollHeight, 150) + "px";
-            }}
+            onChange={(e) => setInput(e.target.value)}
             disabled={isTyping}
             placeholder={isTyping ? "Nova is thinking..." : "Message Nova..."}
             onKeyDown={(e) => {
@@ -403,7 +367,8 @@ function ChatArea({
               border: "none",
               outline: "none",
               resize: "none",
-              height: "50px",
+              fieldSizing: "content",
+              minHeight: "50px",
               maxHeight: "150px",
               background: "transparent",
               lineHeight: "1.4",

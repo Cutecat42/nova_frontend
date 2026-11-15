@@ -404,75 +404,67 @@ function App() {
       ? currentText
           .split("\n")
           .filter(Boolean)
-          .map((t, i) => `${i + 1}. ${t}`)
+          .map((t, i) => {
+            const clean = t.replace(/^✔ /, "");
+            const m = clean.match(/^\[([^\]]+)\]\s*(.*)$/);
+            const doneText = t.startsWith("✔ ") ? "(COMPLETED) " : "";
+            if (m)
+              return `${i + 1}. ${doneText}Section: "${m[1]}" | Task: "${m[2]}"`;
+            return `${i + 1}. ${doneText}${t}`;
+          })
           .join("\n")
       : "(empty)";
 
     const prompt = `You maintain the to-do list / project state for ONE chat called "${title}".
 
-CURRENT LIST (numbered):
-${numbered}
+    CURRENT LIST (numbered):
+    ${numbered}
 
-Read the USER MESSAGE and output ONLY JSON describing changes to the list:
-{"ops":[ ... ]}
+    Read the USER MESSAGE and output ONLY JSON describing changes to the list:
+    {"ops":[ ... ]}
 
-Output format examples:
+    Output format examples:
 
-For adding items to multiple sections:
-{"ops":[
-  {"op":"add","list":"The Algebra Foundations","items":["Factoring Mastery","Rational Expressions"]},
-  {"op":"add","list":"Function Fundamentals","items":["Domain & Range","Function Composition"]},
-  {"op":"add","list":"Trigonometry Prep","items":["Unit Circle","Basic Trig Ratios"]}
-]}
+    For adding items to multiple sections (ALWAYS INCLUDE DESCRIPTIONS IF PROVIDED):
+    {"ops":[
+    {"op":"add","list":"The Algebra Foundations","items":["Factoring Mastery: Learn how to decompose complex algebraic expressions into simpler factors.","Rational Expressions: Simplify fractions and solve for variables."]},
+    {"op":"add","list":"Function Fundamentals","items":["Domain & Range: Identify valid inputs and outputs for graphing.","Function Composition: Combine multiple functions together."]}
+    ]}
 
-For removing items:
-{"ops":[{"op":"remove","numbers":[2,4]}]}
+    For removing items:
+    {"ops":[{"op":"remove","numbers":[2,4]}]}
 
-For completing items:
-{"ops":[{"op":"done","numbers":[1]}]}
+    For completing items:
+    {"ops":[{"op":"done","numbers":[1]}]}
 
-For clearing the entire list:
-{"ops":[{"op":"clear"}]}
+    For clearing the entire list:
+    {"ops":[{"op":"clear"}]}
 
-STRICT JSON STRUCTURE:
-- The top-level object must contain an "ops" array.
-- Every operation must be directly inside "ops".
-- An "add" operation must have a string "list" and an "items" array containing ONLY strings.
-- NEVER put an operation object inside "items".
-- NEVER nest operations inside other operations.
-- Each section must have its own separate "add" operation.
-- Do not output Markdown or explanatory text outside the JSON.
+    STRICT JSON STRUCTURE:
+    - The top-level object must contain an "ops" array.
+    - Every operation must be directly inside "ops".
+    - An "add" operation must have a string "list" and an "items" array containing ONLY strings.
+    - NEVER put an operation object inside "items".
+    - NEVER nest operations inside other operations.
+    - Each section must have its own separate "add" operation.
+    - Do not output Markdown or explanatory text outside the JSON.
 
-Rules:
-- Act on what the USER asks for, or on what NOVA'S REPLY says was added, removed, or completed because the user asked or agreed.
-- If the user asks Nova to create, draft, or make a list or plan, and her reply contains it, add those items.
-- Do NOT add ideas Nova merely floated that the user hasn't asked for or accepted.
-- Only add real tasks or notes. Never add placeholders, questions, or status text (like "pending" or "awaiting your directive").
-- Reuse an existing section whenever it fits.
-- Preserve meaningful section names and phase names from Nova's response.
-- For a newly created structured list, use its original headings as section names.
-- Treat each meaningful heading as a separate section and output a separate "add" operation for each section.
-- Never combine items from different sections into one "add" operation.
-- Do not collapse multiple phases or sections into one section.
-- If the user names a section, use that exact section name.
-- If no suitable section exists, create an appropriate, concise section name based on the task.
-- For a new list, organize items into sensible sections based on their subject when Nova's response does not already provide headings.
-- Never reuse section names from another chat unless explicitly requested.
-- NEVER use "Completed", "Done", "Pending" or "To Do" as a section name. To finish an item, use {"op":"done","numbers":[n]} so it stays in its own section.
-- When the user identifies an item by name for removal or completion, find its exact number in the CURRENT LIST and use that number. Do not guess.
-- Preserve every item's complete title AND description from NOVA'S REPLY.
-- Never shorten, summarize, paraphrase, or discard an item's description.
-- Store each item as ONE string in the items array.
-- If an item has a title and description, combine them as:
-  "Title: Full description."
-- Preserve all meaningful details, including examples, formulas, and explanations.
-- Do not turn descriptions into separate list items.
-- When adding items, extract the complete text of every item from NOVA'S REPLY.
-- If nothing about the list changes, output {"ops":[]}.
+    Rules:
+    - EXACT DELETION: When the user asks to remove ONE item, output ONLY that exact single number in the "numbers" array. Never guess, combine, or bundle other numbers.
+    - NO UNWANTED MOVES: Never move an existing item to a new section or to "Main" unless the user explicitly asks to move it.
+    - PRESERVE SECTIONS: When adding or modifying an item, look at the "Section:" in the CURRENT LIST and use that exact string for the "list" field.
+    - Act on what the USER asks for, or on what NOVA'S REPLY says was added, removed, or completed.
+    - If the user asks Nova to create, draft, or make a list or plan, and her reply contains it, add those items.
+    - Only add real tasks or notes. Never add placeholders, questions, or status text.
+    - Reuse an existing section whenever it fits.
+    - For a new list, organize items into sensible sections based on their subject when Nova's response does not already provide headings.
+    - NEVER use "Completed", "Done", "Pending" or "To Do" as a section name. To finish an item, use {"op":"done","numbers":[n]} so it stays in its own section.
+    - Preserve every item's complete title AND description from NOVA'S REPLY.
+    - Store each item as ONE string in the items array. Format it as "Title: Description".
+    - If nothing about the list changes, output {"ops":[]}.
 
-USER MESSAGE: ${JSON.stringify(userMessage)}
-NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
-
+    USER MESSAGE: ${JSON.stringify(userMessage)}
+    NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
     try {
       const res = await ollamaFetch("/chat", {
         method: "POST",
@@ -1324,21 +1316,13 @@ NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
       setMemoryBusy(true);
 
       (async () => {
+        setMemoryBusy(true);
+
         const explicitListChange = isExplicitListChangeRequest(userMessage);
 
         const readOnlyListRequest =
           looksLikeListTalk(userMessage, !!thisChat?.state) &&
           !explicitListChange;
-
-        console.log("📋 LIST UPDATE DECISION:", {
-          userMessage,
-          explicitListChange,
-          readOnlyListRequest,
-          claimsListChange: claimsListChange(reply),
-          willUpdate:
-            !readOnlyListRequest &&
-            (explicitListChange || claimsListChange(reply)),
-        });
 
         if (
           !readOnlyListRequest &&
@@ -1350,6 +1334,8 @@ NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
         }
 
         await retainMemory(userMessage, reply, activeSessionId, currentUserId);
+
+        setMemoryBusy(false);
       })()
         .catch((e) => console.error("Background memory error:", e))
         .finally(() => setMemoryBusy(false));
