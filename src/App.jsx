@@ -5,6 +5,7 @@ import ChatArea from "./components/ChatArea.jsx";
 import { novaCodingRules, novaProtocols } from "./novaRules.js";
 
 // ---------- Memory settings ----------
+
 const CHAT_WINDOW = 20;
 
 function isListHeavy(text) {
@@ -752,15 +753,25 @@ function App() {
       const data = await res.json();
 
       if (data && data.results && data.results.length > 0) {
-        let currentChatMemories = [];
-        let otherChatMemories = [];
+        const currentChatMemories = [];
+        const otherChatMemories = [];
 
-        data.results.forEach((r) => {
-          if (r.metadata && r.metadata.user_id !== userId) {
-            return;
-          }
+        const seen = new Set();
+        const relevant = [];
 
-          if (r.metadata && r.metadata.session_id === currentSessionId) {
+        for (const r of data.results) {
+          if ((r.scores?.final ?? 1) < 0.1) continue;
+
+          const key = (r.text || "").trim().toLowerCase();
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+
+          relevant.push(r);
+          if (relevant.length >= 8) break;
+        }
+
+        relevant.forEach((r) => {
+          if (r.metadata?.session_id === currentSessionId) {
             currentChatMemories.push(`- ${r.text}`);
           } else {
             otherChatMemories.push(`- ${r.text}`);
@@ -1380,22 +1391,34 @@ function App() {
         );
       };
 
+      let shownLength = 0;
+
+      const STREAM_TICK_MS = 200;
+
+      const renderTick = () => {
+        streamRenderTimerRef.current = null;
+
+        const lastBreak = Math.max(
+          fullReply.lastIndexOf(" "),
+          fullReply.lastIndexOf("\n"),
+        );
+        if (lastBreak < shownLength) return;
+
+        shownLength = lastBreak + 1;
+        const textToRender = fullReply.slice(0, shownLength);
+
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? { ...msg, text: textToRender }
+              : msg,
+          ),
+        );
+      };
+
       const scheduleStreamRender = () => {
         if (streamRenderTimerRef.current) return;
-
-        streamRenderTimerRef.current = setTimeout(() => {
-          streamRenderTimerRef.current = null;
-
-          const textToRender = fullReply;
-
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, text: textToRender }
-                : msg,
-            ),
-          );
-        }, 35);
+        streamRenderTimerRef.current = setTimeout(renderTick, STREAM_TICK_MS);
       };
 
       const processStreamLine = (line) => {
