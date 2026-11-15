@@ -662,10 +662,17 @@ function App() {
 
   async function retainMemory(userText, aiText, sessionId, userId) {
     try {
+      const maxLen = 2000;
+      const safeAiText =
+        aiText.length > maxLen
+          ? aiText.slice(0, maxLen) +
+            "\n... [Output too long, truncated for memory]"
+          : aiText;
+
       const res = await apiFetch("/api/hindsight/retain", {
         method: "POST",
         body: JSON.stringify({
-          text: `User: ${userText}\nNova: ${aiText}`,
+          text: `User: ${userText}\nNova: ${safeAiText}`,
           metadata: { session_id: sessionId, user_id: userId },
         }),
       });
