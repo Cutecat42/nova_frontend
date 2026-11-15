@@ -80,6 +80,76 @@ const CodeBlock = ({ match, codeString }) => {
   );
 };
 
+const remarkPlugins = [remarkMath];
+const rehypePlugins = [rehypeKatex];
+
+const markdownComponents = {
+  code({ node, inline, className, children, ...props }) {
+    const match = /language-(\w+)/.exec(className || "");
+
+    let rawString = "";
+    if (node && node.children && node.children.length > 0) {
+      rawString = node.children[0].value;
+    } else {
+      rawString = String(children).replace(/\n$/, "");
+    }
+
+    return !inline && match ? (
+      <CodeBlock match={match} codeString={rawString} />
+    ) : (
+      <code
+        {...props}
+        className={className}
+        style={{
+          background: "#d7dadd",
+          padding: "2px 6px",
+          borderRadius: "4px",
+          color: "#d93025",
+          fontFamily: "monospace",
+          fontSize: "13px",
+          whiteSpace: "pre-wrap",
+        }}
+      >
+        {children}
+      </code>
+    );
+  },
+};
+
+const MessageBubble = React.memo(function MessageBubble({ msg, isMobile }) {
+  return (
+    <div
+      id={msg.id ? `message-${msg.id}` : undefined}
+      style={{
+        alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
+        background: msg.role === "user" ? "#e8f0fe" : "#f1f3f4",
+        color: "#202124",
+        padding: "12px 18px",
+        borderRadius: "24px",
+        borderBottomRightRadius: msg.role === "user" ? "6px" : "24px",
+        borderBottomLeftRadius: msg.role === "ai" ? "6px" : "24px",
+        maxWidth: isMobile ? "90%" : "75%",
+        lineHeight: "1.6",
+        fontSize: "15px",
+      }}
+    >
+      {msg.role === "ai" ? (
+        <div className="markdown-body">
+          <ReactMarkdown
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={rehypePlugins}
+            components={markdownComponents}
+          >
+            {msg.text}
+          </ReactMarkdown>
+        </div>
+      ) : (
+        <div style={{ whiteSpace: "pre-wrap" }}>{msg.text}</div>
+      )}
+    </div>
+  );
+});
+
 function ChatArea({
   sidebarOpen,
   setSidebarOpen,
@@ -122,6 +192,8 @@ function ChatArea({
       });
     }
   }, [messages, scrollContainerRef]);
+
+  const isMobile = window.innerWidth < 768;
 
   return (
     <div
@@ -169,7 +241,7 @@ function ChatArea({
               fontSize: "12px",
               fontWeight: "bold",
               color: isConnected ? "#28a745" : "#dc3545",
-              display: window.innerWidth < 768 ? "none" : "block",
+              display: isMobile ? "none" : "block",
             }}
           >
             {isConnected ? "● Online" : "○ Offline"}
@@ -200,7 +272,7 @@ function ChatArea({
             flexShrink: 0,
             display: "flex",
             gap: "20px",
-            flexDirection: window.innerWidth < 768 ? "column" : "row",
+            flexDirection: isMobile ? "column" : "row",
           }}
         >
           <div style={{ flex: 1 }}>
@@ -259,74 +331,14 @@ function ChatArea({
         {messages
           ?.filter((msg) => !(msg.role === "ai" && !msg.text?.trim()))
           .map((msg, i) => (
-            <div
-              key={msg.id || i}
-              id={msg.id ? `message-${msg.id}` : undefined}
-              style={{
-                alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
-                background: msg.role === "user" ? "#e8f0fe" : "#f1f3f4",
-                color: "#202124",
-                padding: "12px 18px",
-                borderRadius: "24px",
-                borderBottomRightRadius: msg.role === "user" ? "6px" : "24px",
-                borderBottomLeftRadius: msg.role === "ai" ? "6px" : "24px",
-                maxWidth: window.innerWidth < 768 ? "90%" : "75%",
-                lineHeight: "1.6",
-                fontSize: "15px",
-              }}
-            >
-              {msg.role === "ai" ? (
-                <div className="markdown-body">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
-                    components={{
-                      code({ node, inline, className, children, ...props }) {
-                        const match = /language-(\w+)/.exec(className || "");
-
-                        let rawString = "";
-                        if (node && node.children && node.children.length > 0) {
-                          rawString = node.children[0].value;
-                        } else {
-                          rawString = String(children).replace(/\n$/, "");
-                        }
-
-                        return !inline && match ? (
-                          <CodeBlock match={match} codeString={rawString} />
-                        ) : (
-                          <code
-                            {...props}
-                            className={className}
-                            style={{
-                              background: "#d7dadd",
-                              padding: "2px 6px",
-                              borderRadius: "4px",
-                              color: "#d93025",
-                              fontFamily: "monospace",
-                              fontSize: "13px",
-                              whiteSpace: "pre-wrap",
-                            }}
-                          >
-                            {children}
-                          </code>
-                        );
-                      },
-                    }}
-                  >
-                    {msg.text}
-                  </ReactMarkdown>
-                </div>
-              ) : (
-                <div style={{ whiteSpace: "pre-wrap" }}>{msg.text}</div>
-              )}
-            </div>
+            <MessageBubble key={msg.id || i} msg={msg} isMobile={isMobile} />
           ))}
         <div ref={messagesEndRef} />
       </div>
 
       <div
         style={{
-          padding: window.innerWidth < 768 ? "10px" : "20px",
+          padding: isMobile ? "10px" : "20px",
           background: "#fff",
           flexShrink: 0,
         }}
@@ -353,11 +365,20 @@ function ChatArea({
             disabled={isTyping}
             placeholder={isTyping ? "Nova is thinking..." : "Message Nova..."}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                e.preventDefault();
-                e.target.style.height = "50px";
-                handleSendMessage(e);
-              }
+              if (e.key !== "Enter") return;
+
+              if (e.nativeEvent.isComposing) return;
+
+              const isTouchDevice =
+                window.matchMedia("(pointer: coarse)").matches;
+              const wantsSend =
+                e.ctrlKey || e.metaKey || (!isTouchDevice && !e.shiftKey);
+
+              if (!wantsSend) return;
+
+              e.preventDefault();
+              e.target.style.height = "50px";
+              handleSendMessage(e);
             }}
             style={{
               flex: 1,

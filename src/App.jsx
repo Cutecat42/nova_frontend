@@ -1393,18 +1393,27 @@ function App() {
 
       let shownLength = 0;
 
-      const STREAM_TICK_MS = 200;
+      const STREAM_TICK_MS = 250;
 
       const renderTick = () => {
         streamRenderTimerRef.current = null;
 
-        const lastBreak = Math.max(
-          fullReply.lastIndexOf(" "),
-          fullReply.lastIndexOf("\n"),
+        const done = fullReply.slice(
+          0,
+          Math.max(fullReply.lastIndexOf(" "), fullReply.lastIndexOf("\n")) + 1,
         );
-        if (lastBreak < shownLength) return;
 
-        shownLength = lastBreak + 1;
+        const ends = [];
+        const re = /\S+\s+/g;
+        let m;
+        while ((m = re.exec(done)) !== null) ends.push(m.index + m[0].length);
+
+        const pending = ends.filter((e) => e > shownLength);
+        if (pending.length === 0) return;
+
+        const n = Math.max(1, Math.ceil(pending.length / 4));
+        shownLength = pending[n - 1];
+
         const textToRender = fullReply.slice(0, shownLength);
 
         setMessages((prev) =>
@@ -1414,6 +1423,10 @@ function App() {
               : msg,
           ),
         );
+
+        if (pending.length > n) {
+          streamRenderTimerRef.current = setTimeout(renderTick, STREAM_TICK_MS);
+        }
       };
 
       const scheduleStreamRender = () => {
