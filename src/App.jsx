@@ -108,6 +108,58 @@ function applyStateOps(stateText, ops) {
   return order.flatMap((t) => all.filter((l) => tagOf(l) === t)).join("\n");
 }
 
+function verifyNumberedOps(ops, currentText) {
+  const lines = currentText ? currentText.split("\n").filter(Boolean) : [];
+  const body = (l) =>
+    l
+      .replace(/^✔ /, "")
+      .replace(/^\[[^\]]+\]\s*/, "")
+      .toLowerCase();
+  const out = [];
+
+  for (const op of ops) {
+    if (op?.op !== "remove" && op?.op !== "done") {
+      out.push(op);
+      continue;
+    }
+
+    const titles = Array.isArray(op.titles) ? op.titles : [];
+    const nums = [];
+
+    (op.numbers || []).forEach((n, k) => {
+      const title = String(titles[k] ?? "")
+        .toLowerCase()
+        .replace(/\*\*/g, "")
+        .trim();
+      const line = lines[Number(n) - 1];
+
+      if (!title) {
+        if (line) nums.push(Number(n));
+        return;
+      }
+
+      if (line && body(line).includes(title)) {
+        nums.push(Number(n));
+        return;
+      }
+
+      const hit = lines.findIndex((l) => body(l).includes(title));
+      if (hit >= 0) {
+        console.warn(
+          `⚠️ Model said #${n}, but title matched #${hit + 1}. Using #${hit + 1}.`,
+        );
+        nums.push(hit + 1);
+      } else {
+        console.warn("🚫 Dropped unverifiable op:", op.op, n, title);
+      }
+    });
+
+    if (nums.length) out.push({ ...op, numbers: [...new Set(nums)] });
+  }
+
+  return out;
+}
+
 function formatStateForPrompt(state) {
   const groups = {};
 
@@ -170,9 +222,35 @@ function App() {
 
   // --- Settings & Rules ---
   const [showSettings, setShowSettings] = useState(false);
-  const [customInstructions, setCustomInstructions] = useState(
-    () => localStorage.getItem("customInstructions") || "",
+  const instructionsKey = (userId) => `customInstructions:${userId}`;
+
+  const loadInstructionsFor = (userId) =>
+    userId
+      ? (localStorage.getItem(instructionsKey(userId)) ??
+        localStorage.getItem("customInstructions") ??
+        "")
+      : "";
+
+  const [customInstructions, setCustomInstructionsState] = useState(() =>
+    loadInstructionsFor(localStorage.getItem("currentUserId")),
   );
+
+  const settingsSaveTimerRef = useRef(null);
+
+  function setCustomInstructions(value) {
+    const next =
+      typeof value === "function" ? value(customInstructions) : value;
+    setCustomInstructionsState(next);
+    if (currentUserId) {
+      localStorage.setItem(instructionsKey(currentUserId), next);
+    }
+
+    clearTimeout(settingsSaveTimerRef.current);
+    settingsSaveTimerRef.current = setTimeout(
+      () => saveSettingsToServer(next),
+      800,
+    );
+  }
 
   const [memoryBusy, setMemoryBusy] = useState(false);
   const currentSessionIdRef = useRef(null);
@@ -184,6 +262,7 @@ function App() {
   const activeAssistantMessageIdRef = useRef(null);
 
   const listUpdateRef = useRef(Promise.resolve());
+  const sendLockRef = useRef(false);
 
   const chatSessionsRef = useRef(chatSessions);
   const previousSessionRef = useRef(null);
@@ -198,6 +277,7 @@ function App() {
     setAuthToken(null);
     setCurrentUser(null);
     setCurrentUserId(null);
+    setCustomInstructionsState("");
 
     localStorage.removeItem("currentUser");
     localStorage.removeItem("currentUserId");
@@ -237,10 +317,6 @@ function App() {
 
   // --- Initialization & API Fetching ---
   useEffect(() => {
-    localStorage.setItem("customInstructions", customInstructions);
-  }, [customInstructions]);
-
-  useEffect(() => {
     chatSessionsRef.current = chatSessions;
   }, [chatSessions]);
 
@@ -258,6 +334,7 @@ function App() {
         const sessions = await fetchSessions();
 
         fetchChatStates();
+        fetchSettings();
         checkConnection();
 
         const previousSessionId = currentSessionIdRef.current;
@@ -317,6 +394,43 @@ function App() {
     }
   }
 
+  async function saveSettingsToServer(value) {
+    try {
+      const res = await apiFetch("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ customInstructions: value }),
+      });
+
+      if (!res.ok) {
+        console.error("Settings save failed:", res.status, await res.text());
+      }
+    } catch (e) {
+      console.error("Settings save error:", e);
+    }
+  }
+
+  async function fetchSettings() {
+    try {
+      const res = await apiFetch("/api/settings");
+      if (!res.ok) return;
+
+      const data = await res.json();
+
+      if (typeof data.customInstructions === "string") {
+        setCustomInstructionsState(data.customInstructions);
+        localStorage.setItem(
+          instructionsKey(currentUserId),
+          data.customInstructions,
+        );
+      } else {
+        const local = loadInstructionsFor(currentUserId);
+        if (local) saveSettingsToServer(local);
+      }
+    } catch (e) {
+      console.error("Settings fetch error:", e);
+    }
+  }
+
   async function fetchChatStates() {
     try {
       const res = await apiFetch("/api/chat-state");
@@ -335,7 +449,7 @@ function App() {
     }
   }
 
-  function findMentionedChats(message, excludeId) {
+  function findMentionedChats(message, excludeId, states = chatStates) {
     const msg = message.toLowerCase();
     const msgWords = new Set(msg.match(/[a-z0-9]{4,}/g) || []);
 
@@ -358,7 +472,7 @@ function App() {
       "give",
     ]);
 
-    return chatStates
+    return states
       .filter((c) => {
         if (c.id === excludeId || !c.state) return false;
 
@@ -419,9 +533,6 @@ function App() {
 
     const prompt = `You maintain the to-do list / project state for ONE chat called "${title}".
 
-    CURRENT LIST (numbered):
-    ${numbered}
-
     Read the USER MESSAGE and output ONLY JSON describing changes to the list:
     {"ops":[ ... ]}
 
@@ -433,11 +544,11 @@ function App() {
     {"op":"add","list":"Function Fundamentals","items":["Domain & Range: Identify valid inputs and outputs for graphing.","Function Composition: Combine multiple functions together."]}
     ]}
 
-    For removing items:
-    {"ops":[{"op":"remove","numbers":[2,4]}]}
+    For removing items (copy each item's Task title EXACTLY, the text before the colon):
+    {"ops":[{"op":"remove","numbers":[3],"titles":["Exact Title Here"]}]}
 
     For completing items:
-    {"ops":[{"op":"done","numbers":[1]}]}
+    {"ops":[{"op":"done","numbers":[1],"titles":["Exact Title Here"]}]}
 
     For clearing the entire list:
     {"ops":[{"op":"clear"}]}
@@ -453,6 +564,7 @@ function App() {
 
     Rules:
     - EXACT DELETION: When the user asks to remove ONE item, output ONLY that exact single number in the "numbers" array. Never guess, combine, or bundle other numbers.
+    - For remove and done, "titles" needs one entry per number, copied exactly from that item's Task text. If the user's message does not clearly refer to an item on the list, output {"ops":[]}.
     - NO UNWANTED MOVES: Never move an existing item to a new section or to "Main" unless the user explicitly asks to move it.
     - PRESERVE SECTIONS: When adding or modifying an item, look at the "Section:" in the CURRENT LIST and use that exact string for the "list" field.
     - Act on what the USER asks for, or on what NOVA'S REPLY says was added, removed, or completed.
@@ -463,7 +575,11 @@ function App() {
     - NEVER use "Completed", "Done", "Pending" or "To Do" as a section name. To finish an item, use {"op":"done","numbers":[n]} so it stays in its own section.
     - Preserve every item's complete title AND description from NOVA'S REPLY.
     - Store each item as ONE string in the items array. Format it as "Title: Description".
+    - Strip Markdown from items: no **, no bullets, no numbering. Store plain "Title: Description".
     - If nothing about the list changes, output {"ops":[]}.
+
+    CURRENT LIST (numbered):
+    ${numbered}
 
     USER MESSAGE: ${JSON.stringify(userMessage)}
     NOVA'S REPLY: ${JSON.stringify(String(novaReply || ""))}`;
@@ -486,14 +602,16 @@ function App() {
 
       const data = await res.json();
       const parsed = JSON.parse(data.message?.content || data.response || "{}");
-      const ops = Array.isArray(parsed.ops) ? parsed.ops : [];
+      const rawOps = Array.isArray(parsed.ops) ? parsed.ops : [];
 
       console.log(
         "📋 Extractor raw output:",
         data.message?.content,
         "→ ops:",
-        ops,
+        rawOps,
       );
+
+      const ops = verifyNumberedOps(rawOps, currentText);
 
       if (!ops.length) return;
 
@@ -512,6 +630,13 @@ function App() {
         );
         return;
       }
+
+      const stateLines = currentText.split("\n").filter(Boolean);
+      ops.forEach((o) =>
+        (o.numbers || []).forEach((n) =>
+          console.log(`📋 ${o.op} #${n}:`, stateLines[n - 1]),
+        ),
+      );
 
       const newState = applyStateOps(currentText, ops);
 
@@ -722,22 +847,18 @@ function App() {
   function submitRename(session) {
     const newTitle = editTitleValue.trim() || session.title;
 
-    setChatSessions((prev) => {
-      const updated = prev.map((s) =>
-        s.id === session.id ? { ...s, title: newTitle } : s,
-      );
+    setChatSessions((prev) =>
+      prev.map((s) => (s.id === session.id ? { ...s, title: newTitle } : s)),
+    );
 
-      const sessionToSync = updated.find((s) => s.id === session.id);
-      if (sessionToSync) syncSessionToDB(sessionToSync);
-
-      return updated;
-    });
+    syncSessionToDB({ ...session, title: newTitle });
 
     setEditingChatId(null);
   }
 
   async function handleDeleteChat(id) {
     setChatSessions((prev) => prev.filter((s) => s.id !== id));
+    setChatStates((prev) => prev.filter((c) => c.id !== id));
 
     if (currentSessionId === id) {
       setCurrentSessionId(null);
@@ -768,7 +889,7 @@ function App() {
       const res = await ollamaFetch("/chat", {
         method: "POST",
         body: JSON.stringify({
-          model: OLLAMA_MODEL,
+          model: EXTRACT_MODEL,
           messages: [
             {
               role: "user",
@@ -776,7 +897,9 @@ function App() {
             },
           ],
           stream: false,
-          options: { num_predict: 10, num_ctx: 1024 },
+          think: false,
+          keep_alive: "10m",
+          options: { num_predict: 16, num_ctx: 1024 },
         }),
       });
 
@@ -792,16 +915,13 @@ function App() {
       smartTitle = smartTitle.replace(/['"]+/g, "");
 
       if (smartTitle) {
-        setChatSessions((prev) => {
-          const updated = prev.map((s) =>
+        setChatSessions((prev) =>
+          prev.map((s) =>
             s.id === sessionId ? { ...s, title: smartTitle } : s,
-          );
+          ),
+        );
 
-          const sessionToSync = updated.find((s) => s.id === sessionId);
-          if (sessionToSync) syncSessionToDB(sessionToSync);
-
-          return updated;
-        });
+        syncSessionToDB({ id: sessionId, title: smartTitle });
       }
     } catch (e) {
       console.error("Auto-title generation failed", e);
@@ -842,6 +962,7 @@ function App() {
 
         sessionExpiredRef.current = false;
 
+        setCustomInstructionsState(loadInstructionsFor(String(user.id)));
         setCurrentUser(user.username);
         setCurrentUserId(String(user.id));
         setAuthToken(user.token);
@@ -864,6 +985,7 @@ function App() {
   }
 
   function handleLogout() {
+    setCustomInstructionsState("");
     setCurrentUser(null);
     setCurrentUserId(null);
     setAuthToken(null);
@@ -906,7 +1028,8 @@ function App() {
 
   async function handleSendMessage(e) {
     if (e) e.preventDefault();
-    if (!input.trim() || isTyping) return;
+    if (!input.trim() || isTyping || sendLockRef.current) return;
+    sendLockRef.current = true;
 
     let activeSessionId = currentSessionId;
 
@@ -917,6 +1040,7 @@ function App() {
     } catch (error) {
       console.error("Could not create chat:", error);
       setIsConnected(false);
+      sendLockRef.current = false;
       return;
     }
 
@@ -1002,6 +1126,7 @@ function App() {
 
       setIsTyping(false);
       activeAssistantMessageIdRef.current = null;
+      sendLockRef.current = false;
       return;
     }
 
@@ -1062,7 +1187,11 @@ function App() {
       ${formatStateForPrompt(thisChat.state)}\n\n`;
     }
 
-    const mentionedChats = findMentionedChats(userMessage, activeSessionId);
+    const mentionedChats = findMentionedChats(
+      userMessage,
+      activeSessionId,
+      freshStates,
+    );
 
     mentionedChats.forEach((c) => {
       dynamicContext += `[OTHER CHAT: "${c.title}": read-only reference. Changes must be made inside that chat.]
@@ -1091,7 +1220,8 @@ function App() {
       content: dynamicContext.trim(),
     });
 
-    const MAX_RECENT_HISTORY_TOKENS = 1000;
+    const MAX_RECENT_HISTORY_TOKENS = 3000;
+    const MAX_TOKENS_PER_MESSAGE = 800;
     const CHARS_PER_TOKEN_ESTIMATE = 3.5;
 
     const recentMessages = [];
@@ -1103,19 +1233,28 @@ function App() {
       i--
     ) {
       const msg = messages[i];
-      const content = msg.text || "";
+      let content = msg.text || "";
 
       if (!content.trim()) continue;
 
-      const estimatedTokens = Math.ceil(
+      let estimatedTokens = Math.ceil(
         content.length / CHARS_PER_TOKEN_ESTIMATE,
       );
+
+      if (estimatedTokens > MAX_TOKENS_PER_MESSAGE) {
+        content =
+          content.slice(
+            0,
+            Math.floor(MAX_TOKENS_PER_MESSAGE * CHARS_PER_TOKEN_ESTIMATE),
+          ) + "\n…[truncated]";
+        estimatedTokens = MAX_TOKENS_PER_MESSAGE;
+      }
 
       if (recentHistoryTokens + estimatedTokens > MAX_RECENT_HISTORY_TOKENS) {
         break;
       }
 
-      recentMessages.unshift(msg);
+      recentMessages.unshift({ ...msg, text: content });
       recentHistoryTokens += estimatedTokens;
     }
 
@@ -1386,6 +1525,7 @@ function App() {
       }
 
       setIsTyping(false);
+      sendLockRef.current = false;
     }
   }
 
